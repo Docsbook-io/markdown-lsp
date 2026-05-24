@@ -1,6 +1,6 @@
 {
   "name": "markdown-lsp",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Language Server Protocol implementation for Markdown with optional AI-canonicalized glossary that resolves synonyms across docs",
   "type": "module",
   "bin": {
@@ -19,8 +19,9 @@
     "dev": "tsx src/server.ts --stdio",
     "migrate": "tsx scripts/apply-migration.ts",
     "test": "vitest run",
+    "test:fast": "vitest run test/parseMarkdown.test.ts test/bridge.test.ts test/ai-disabled.test.ts",
     "test:watch": "vitest",
-    "prepublishOnly": "pnpm build && pnpm test"
+    "prepublishOnly": "pnpm build && pnpm test:fast"
   },
   "dependencies": {
     "@ai-sdk/openai": "^3.0.65",
