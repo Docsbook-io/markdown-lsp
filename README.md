@@ -1,4 +1,10 @@
-# @docsbook/markdown-lsp
+# markdown-lsp
+
+[![npm version](https://img.shields.io/npm/v/markdown-lsp.svg?style=flat-square)](https://www.npmjs.com/package/markdown-lsp)
+[![npm downloads](https://img.shields.io/npm/dm/markdown-lsp.svg?style=flat-square)](https://www.npmjs.com/package/markdown-lsp)
+[![CI](https://img.shields.io/github/actions/workflow/status/Docsbook-io/markdown-lsp/ci.yml?branch=main&label=ci&style=flat-square)](https://github.com/Docsbook-io/markdown-lsp/actions/workflows/ci.yml)
+[![license](https://img.shields.io/npm/l/markdown-lsp.svg?style=flat-square)](https://github.com/Docsbook-io/markdown-lsp/blob/main/LICENSE)
+[![node](https://img.shields.io/node/v/markdown-lsp.svg?style=flat-square)](https://www.npmjs.com/package/markdown-lsp)
 
 Language Server Protocol implementation for Markdown documentation. Optional AI-powered semantic layer on top.
 
