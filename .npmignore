@@ -1,0 +1,13 @@
+node_modules/
+src/
+test/
+scripts/
+.env*
+.git*
+.vscode/
+*.log
+.DS_Store
+coverage/
+tsconfig.json
+vitest.config.ts
+drizzle.config.ts

@@ -1,0 +1,55 @@
+{
+  "name": "markdown-lsp-vscode",
+  "displayName": "Markdown LSP (semantic)",
+  "description": "Semantic Markdown language server with AI-canonicalized glossary",
+  "version": "0.0.1",
+  "publisher": "docsbook",
+  "engines": { "vscode": "^1.80.0" },
+  "categories": ["Programming Languages", "Other"],
+  "activationEvents": ["onLanguage:markdown"],
+  "main": "./out/extension.js",
+  "contributes": {
+    "configuration": {
+      "title": "Markdown LSP",
+      "properties": {
+        "markdownLsp.serverPath": {
+          "type": "string",
+          "default": "",
+          "description": "Absolute path to dist/server.js. If empty, falls back to the bundled path."
+        },
+        "markdownLsp.databaseUrl": {
+          "type": "string",
+          "default": "",
+          "description": "Postgres + pgvector connection string. Overrides DATABASE_URL env."
+        },
+        "markdownLsp.aiGatewayApiKey": {
+          "type": "string",
+          "default": "",
+          "description": "Vercel AI Gateway API key (used from M2 onwards)."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "markdownLsp.reindex",
+        "title": "Markdown LSP: Reindex workspace"
+      },
+      {
+        "command": "markdownLsp.restart",
+        "title": "Markdown LSP: Restart server"
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "tsc -p .",
+    "watch": "tsc -p . -w"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.80.0",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.5.0"
+  }
+}
