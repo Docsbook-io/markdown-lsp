@@ -1,6 +1,6 @@
 {
   "name": "markdown-lsp",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "Language Server Protocol implementation for Markdown with optional AI-canonicalized glossary that resolves synonyms across docs",
   "type": "module",
   "bin": {
@@ -9,7 +9,7 @@
   "main": "./dist/server.js",
   "exports": {
     ".": "./dist/server.js",
-    "./bridge": "./dist/bridge/inMemoryGraph.js",
+    "./bridge": "./dist/bridge/index.js",
     "./indexer": "./dist/indexer/indexer.js",
     "./core": "./dist/core/index.js",
     "./parser": "./dist/indexer/parseMarkdown.js"

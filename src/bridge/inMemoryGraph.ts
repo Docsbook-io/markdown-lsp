@@ -5,17 +5,23 @@ export interface InMemoryFile {
   content: string
 }
 
+export interface GraphSection {
+  headingPath: string[]
+  anchor: string | null
+  level: number
+  charCount: number
+  positionStartLine: number
+  positionStartCol: number
+  positionEndLine: number
+  positionEndCol: number
+  content: string
+}
+
 export interface GraphPage {
   path: string
   title: string | null
-  sections: Array<{
-    headingPath: string[]
-    anchor: string | null
-    level: number
-    charCount: number
-    positionStartLine: number
-    positionEndLine: number
-  }>
+  content: string
+  sections: GraphSection[]
 }
 
 export interface GraphLink {
@@ -25,6 +31,10 @@ export interface GraphLink {
   toAnchor: string | null
   kind: ParsedLink["kind"]
   textAtLink: string | null
+  positionStartLine: number
+  positionStartCol: number
+  positionEndLine: number
+  positionEndCol: number
 }
 
 export interface InMemoryGraph {
@@ -33,7 +43,7 @@ export interface InMemoryGraph {
   unresolved: GraphLink[]
 }
 
-function slugify(text: string): string {
+export function slugify(text: string): string {
   return text
     .toLowerCase()
     .trim()
@@ -45,8 +55,8 @@ function normalizePath(p: string): string {
   return p.replace(/\.(md|mdx|markdown)$/i, "").replace(/^\.?\//, "")
 }
 
-function joinPath(baseDir: string, rel: string): string {
-  if (!baseDir) return rel
+export function joinPath(baseDir: string, rel: string): string {
+  if (!baseDir) return rel.replace(/^\.?\//, "")
   if (rel.startsWith("/")) return rel.slice(1)
   const parts = baseDir.split("/").filter(Boolean)
   for (const segment of rel.split("/")) {
@@ -83,14 +93,20 @@ export function buildInMemoryGraph(files: InMemoryFile[]): InMemoryGraph {
     pages.push({
       path: f.path,
       title: parsed.title,
-      sections: parsed.sections.map((s) => ({
-        headingPath: s.headingPath,
-        anchor: s.anchor,
-        level: s.level,
-        charCount: s.charCount,
-        positionStartLine: s.positionStartLine,
-        positionEndLine: s.positionEndLine,
-      })),
+      content: f.content,
+      sections: parsed.sections.map(
+        (s): GraphSection => ({
+          headingPath: s.headingPath,
+          anchor: s.anchor,
+          level: s.level,
+          charCount: s.charCount,
+          positionStartLine: s.positionStartLine,
+          positionStartCol: s.positionStartCol,
+          positionEndLine: s.positionEndLine,
+          positionEndCol: s.positionEndCol,
+          content: s.content,
+        }),
+      ),
     })
 
     for (const l of parsed.links) {
@@ -112,15 +128,18 @@ export function buildInMemoryGraph(files: InMemoryFile[]): InMemoryGraph {
         }
       }
 
-      const link: GraphLink = {
+      allLinks.push({
         fromPath: f.path,
         toPath: l.toPath,
         toResolvedPath: toResolved,
         toAnchor: l.toAnchor,
         kind: l.kind,
         textAtLink: l.textAtLink,
-      }
-      allLinks.push(link)
+        positionStartLine: l.positionStartLine,
+        positionStartCol: l.positionStartCol,
+        positionEndLine: l.positionEndLine,
+        positionEndCol: l.positionEndCol,
+      })
     }
   }
 
