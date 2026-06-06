@@ -3,6 +3,7 @@ import {
   RichDocGraph,
   searchSymbols,
   searchText,
+  searchTextRanked,
   searchPaths,
   searchByAnchor,
   listPages,
@@ -111,6 +112,45 @@ describe("search", () => {
   it("listPages with prefix", () => {
     const result = listPages(graph, { prefix: "docs/" })
     expect(result.map((p) => p.path).sort()).toEqual(["docs/auth.md", "docs/billing.md", "docs/orphan.md"])
+  })
+})
+
+describe("searchTextRanked", () => {
+  it("matches individual words, not the literal phrase (the searchText gap)", () => {
+    // The phrase "OAuth token redirect" appears nowhere verbatim, so the legacy
+    // verbatim searchText finds nothing — ranked search still locates the page.
+    expect(searchText(graph, "OAuth token redirect")).toHaveLength(0)
+    const ranked = searchTextRanked(graph, "OAuth token redirect")
+    expect(ranked.length).toBeGreaterThan(0)
+    expect(ranked[0]!.pagePath).toBe("docs/auth.md")
+  })
+
+  it("drops stop words and matches on the meaningful tokens", () => {
+    // "how do users sign in" → real tokens: users, sign (in/do/how are stop words)
+    const ranked = searchTextRanked(graph, "how do users sign in")
+    expect(ranked.length).toBeGreaterThan(0)
+    expect(ranked[0]!.pagePath).toBe("docs/auth.md")
+  })
+
+  it("ranks heading/title hits above scattered body matches", () => {
+    const ranked = searchTextRanked(graph, "billing webhooks")
+    expect(ranked[0]!.pagePath).toBe("docs/billing.md")
+  })
+
+  it("returns more coverage = higher score", () => {
+    const ranked = searchTextRanked(graph, "authentication oauth sessions")
+    expect(ranked[0]!.pagePath).toBe("docs/auth.md")
+    // auth.md covers all three concepts, so it must outscore any single-word page.
+    expect(ranked[0]!.matchScore).toBeGreaterThan(ranked[1]?.matchScore ?? 0)
+  })
+
+  it("respects pathPrefix", () => {
+    const ranked = searchTextRanked(graph, "authentication", { pathPrefix: "guide" })
+    expect(ranked.every((h) => h.pagePath.startsWith("guide"))).toBe(true)
+  })
+
+  it("returns [] when no query token appears anywhere", () => {
+    expect(searchTextRanked(graph, "kubernetes terraform")).toEqual([])
   })
 })
 

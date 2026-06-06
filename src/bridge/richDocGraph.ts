@@ -336,6 +336,194 @@ export function searchText(graph: RichDocGraph, query: string, opts: SearchTextO
   return hits
 }
 
+// ── Ranked full-text search ────────────────────────────────────────────────────
+//
+// `searchText` above is a verbatim (or regex) matcher — it only fires when the
+// query string appears literally in a page. That's right for grep, but wrong for
+// natural-language questions ("how to create docs", "what formats can I use"):
+// the exact phrase rarely exists, so it returns nothing and a chat agent answers
+// "the documentation does not cover that".
+//
+// `searchTextRanked` fixes that: it tokenizes the query into words, finds pages
+// that contain those words (not the literal phrase), and ranks them by how many
+// distinct query words they cover, frequency, whether words land in a heading,
+// and how tightly the words cluster (a near-phrase match scores higher). The
+// returned snippet is centred on the best-matching window. Stop words are
+// dropped so "how to create docs" effectively searches for "create" + "docs".
+
+const STOP_WORDS = new Set([
+  "a", "an", "and", "are", "as", "at", "be", "by", "can", "do", "does", "for",
+  "from", "how", "i", "in", "is", "it", "its", "me", "my", "of", "on", "or",
+  "our", "that", "the", "their", "them", "this", "to", "use", "using", "was",
+  "we", "what", "when", "where", "which", "who", "why", "will", "with", "you",
+  "your",
+])
+
+/** Split free text into lowercased word tokens (letters/digits, length ≥ 2). */
+function tokenizeText(text: string): string[] {
+  return (text.toLowerCase().match(/[\p{L}\p{N}]{2,}/gu) ?? [])
+}
+
+/** Query tokens: dedup, drop stop words. If every token is a stop word (a very
+ *  short query like "do it"), keep them so the search still has something to do. */
+function queryTokens(query: string): string[] {
+  const all = Array.from(new Set(tokenizeText(query)))
+  const meaningful = all.filter((t) => !STOP_WORDS.has(t))
+  return meaningful.length > 0 ? meaningful : all
+}
+
+interface TokenOccurrence {
+  token: string
+  index: number // char offset in page content
+}
+
+/** All occurrences of any query token in a page, in document order. */
+function tokenOccurrences(content: string, tokens: string[]): TokenOccurrence[] {
+  const occ: TokenOccurrence[] = []
+  const lower = content.toLowerCase()
+  for (const token of tokens) {
+    let from = 0
+    for (;;) {
+      const at = lower.indexOf(token, from)
+      if (at === -1) break
+      // word-ish boundary check so "doc" doesn't match inside "docker" only when
+      // it's clearly a substring of a longer word on BOTH sides; we still allow
+      // prefix/suffix matches (plurals, "docs" ⊃ "doc") for recall.
+      occ.push({ token, index: at })
+      from = at + token.length
+    }
+  }
+  occ.sort((a, b) => a.index - b.index)
+  return occ
+}
+
+/**
+ * Find the tightest window (by char span) that covers the most DISTINCT query
+ * tokens. Returns the covered token set and the [start,end] char span of that
+ * window, used both for scoring (proximity) and for centring the snippet.
+ */
+function bestWindow(
+  occ: TokenOccurrence[],
+  tokenCount: number,
+): { covered: Set<string>; start: number; end: number; span: number } | null {
+  if (occ.length === 0) return null
+  let best: { covered: Set<string>; start: number; end: number; span: number } | null = null
+  // Sliding window over occurrences ordered by position.
+  let left = 0
+  const counts = new Map<string, number>()
+  let distinct = 0
+  for (let right = 0; right < occ.length; right++) {
+    const tk = occ[right]!.token
+    const c = counts.get(tk) ?? 0
+    counts.set(tk, c + 1)
+    if (c === 0) distinct++
+    // Shrink from the left while we still keep all distinct tokens in window.
+    while (left < right) {
+      const lt = occ[left]!.token
+      const lc = counts.get(lt) ?? 0
+      if (lc <= 1) break
+      counts.set(lt, lc - 1)
+      left++
+    }
+    const start = occ[left]!.index
+    const end = occ[right]!.index + occ[right]!.token.length
+    const span = end - start
+    if (
+      !best ||
+      distinct > best.covered.size ||
+      (distinct === best.covered.size && span < best.span)
+    ) {
+      best = {
+        covered: new Set([...counts.entries()].filter(([, n]) => n > 0).map(([t]) => t)),
+        start,
+        end,
+        span,
+      }
+    }
+    if (distinct === tokenCount && span === 0) break
+  }
+  return best
+}
+
+export interface RankedSearchHit extends SearchHit {
+  matchScore: number
+}
+
+/**
+ * Tokenized, ranked full-text search across the graph. Unlike `searchText`, this
+ * matches on individual query WORDS (after stop-word removal) rather than the
+ * literal phrase, then ranks pages by coverage / frequency / heading hits /
+ * proximity. Best for natural-language questions from an AI chat. One hit per
+ * page (the best window), highest score first.
+ */
+export function searchTextRanked(
+  graph: RichDocGraph,
+  query: string,
+  opts: SearchTextOptions = {},
+): RankedSearchHit[] {
+  const tokens = queryTokens(query)
+  if (tokens.length === 0) return []
+  const limit = opts.limit ?? 20
+  const ctx = opts.contextChars ?? 120
+
+  const hits: RankedSearchHit[] = []
+  for (const p of graph.pages) {
+    if (opts.pathPrefix && !p.path.startsWith(opts.pathPrefix)) continue
+    const occ = tokenOccurrences(p.content, tokens)
+    if (occ.length === 0) continue
+
+    const win = bestWindow(occ, tokens.length)
+    if (!win) continue
+
+    const coverage = win.covered.size / tokens.length // 0..1 fraction of query words present
+    const frequency = occ.length // total token occurrences (capped in score)
+
+    // Heading bonus: any query token appearing in a page heading or title.
+    const headingHay = (
+      (p.title ?? "") + " " + p.sections.map((s) => s.headingPath.join(" ")).join(" ")
+    ).toLowerCase()
+    const headingHits = tokens.filter((t) => headingHay.includes(t)).length
+
+    // Proximity bonus: tighter windows (near-phrase) score higher. A window that
+    // spans roughly the matched tokens' own length is ~phrase-adjacent.
+    const idealSpan = win.covered.size * 12
+    const proximity = win.span <= 0 ? 1 : Math.max(0, 1 - win.span / Math.max(idealSpan * 8, 1))
+
+    const matchScore =
+      coverage * 100 + // dominant: how much of the query is present
+      headingHits * 8 + // strong signal: the words are in a heading/title
+      proximity * 12 + // near-phrase matches beat scattered words
+      Math.min(frequency, 10) * 0.5 // mild frequency nudge, capped
+
+    // Snippet centred on the best window.
+    const snippetStart = Math.max(0, win.start - ctx)
+    const snippetEnd = Math.min(p.content.length, win.end + ctx)
+    const snippet =
+      (snippetStart > 0 ? "…" : "") +
+      p.content.slice(snippetStart, snippetEnd).replace(/\s+/g, " ").trim() +
+      (snippetEnd < p.content.length ? "…" : "")
+
+    const { line: startLine, col: startCol } = offsetToLineCol(p.content, win.start)
+    const { line: endLine, col: endCol } = offsetToLineCol(p.content, win.end)
+    const containingSection = p.sections.find(
+      (s) => s.positionStartLine <= startLine && s.positionEndLine >= startLine,
+    )
+
+    hits.push({
+      pagePath: p.path,
+      pageTitle: p.title,
+      headingPath: containingSection?.headingPath ?? [],
+      anchor: containingSection?.anchor ?? null,
+      snippet,
+      range: { start: { line: startLine, col: startCol }, end: { line: endLine, col: endCol } },
+      matchScore,
+    })
+  }
+
+  hits.sort((a, b) => b.matchScore - a.matchScore)
+  return hits.slice(0, limit)
+}
+
 export interface PageSummary {
   path: string
   title: string | null
