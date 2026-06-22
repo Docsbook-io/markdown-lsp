@@ -8,6 +8,9 @@
 
 CLI and library for querying Markdown documentation graphs. Point it at a folder of `.md` files and get instant full-text search, outline, link analysis, symbol lookup, interactive HTML graphs, and AI-powered semantic search at page, heading, or paragraph granularity — all as JSON.
 
+<img width="1709" height="980" alt="Screenshot 2026-06-22 at 13 37 53" src="https://github.com/user-attachments/assets/5c540cd3-d5c0-48ca-90fa-645a266cb0f7" />
+
+
 **Status: v1.3.0. CLI is the default interface. LSP stdio mode available as a subcommand.**
 
 ---
