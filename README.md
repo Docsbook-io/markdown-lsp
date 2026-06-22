@@ -6,9 +6,9 @@
 [![license](https://img.shields.io/npm/l/markdown-lsp.svg?style=flat-square)](https://github.com/Docsbook-io/markdown-lsp/blob/main/LICENSE)
 [![node](https://img.shields.io/node/v/markdown-lsp.svg?style=flat-square)](https://www.npmjs.com/package/markdown-lsp)
 
-CLI and library for querying Markdown documentation graphs. Point it at a folder of `.md` files and get instant full-text search, outline, link analysis, and symbol lookup — all as JSON.
+CLI and library for querying Markdown documentation graphs. Point it at a folder of `.md` files and get instant full-text search, outline, link analysis, symbol lookup, interactive HTML graphs, and AI-powered semantic search — all as JSON.
 
-**Status: v1.1.0. CLI is the default interface. LSP stdio mode available as a subcommand.**
+**Status: v1.2.0. CLI is the default interface. LSP stdio mode available as a subcommand.**
 
 ---
 
@@ -18,11 +18,40 @@ CLI and library for querying Markdown documentation graphs. Point it at a folder
 # List all pages
 npx markdown-lsp workspace-outline ./docs
 
+# Heading outline of a page
+npx markdown-lsp outline ./docs introduction.md
+
 # Full-text search (natural-language, ranked)
 npx markdown-lsp search-text ./docs "getting started"
 
 # Fuzzy heading search
 npx markdown-lsp search-symbols ./docs "auth" --limit 10
+
+# Find pages by glob
+npx markdown-lsp search-paths ./docs "ai/*.md"
+
+# Backlinks and outgoing links
+npx markdown-lsp links-to ./docs quick-start.md
+npx markdown-lsp links-from ./docs README.md
+
+# Resolve a link text / read a section
+npx markdown-lsp resolve-link ./docs README.md "Getting Started"
+npx markdown-lsp get-section ./docs overview.md "quick-links"
+
+# Interactive link graph (HTML, JSON, DOT, Mermaid)
+npx markdown-lsp graph ./docs --format html --out graph.html
+npx markdown-lsp graph ./docs --format json --pretty
+npx markdown-lsp graph ./docs --format dot | dot -Tsvg > graph.svg
+npx markdown-lsp graph ./docs --format mermaid
+
+# Build embeddings + interactive semantic graph in one command
+OPENROUTER_API_KEY=sk-or-... npx markdown-lsp graph ./docs --format html --semantic --out graph.html
+
+# AI semantic search
+OPENROUTER_API_KEY=sk-or-... npx markdown-lsp semantic-search ./docs "how to configure webhooks"
+
+# LSP server (for editors)
+npx markdown-lsp lsp --stdio
 ```
 
 ---
@@ -54,9 +83,9 @@ All subcommands accept a **`--pretty`** flag for indented JSON output (compact b
 | `links-from` | `<docs-dir> <page>` | All links originating from `<page>` |
 | `resolve-link` | `<docs-dir> <from-page> <link-text>` | Resolve a specific link text from a page |
 | `get-section` | `<docs-dir> <page> <anchor>` | Get a section by anchor slug |
+| `graph` | `<docs-dir> [--format json\|dot\|mermaid\|html] [--out file] [--semantic] [--sim-threshold n] [--sim-top-k n] [--model m]` | Export doc link graph; `--semantic` adds AI similarity edges |
+| `semantic-search` | `<docs-dir> <query> [--limit n] [--model m]` | AI semantic search via embeddings |
 | `lsp` / `serve` | `[--stdio]` | Start the LSP stdio server |
-| `graph` | `<docs-dir> [--format json\|dot\|mermaid\|html] [--out file]` | Export the doc link graph |
-| `semantic-search` | `<docs-dir> <query> [--limit n] [--model model]` | AI semantic search via embeddings |
 
 ### search-text modes
 
@@ -118,18 +147,57 @@ markdown-lsp graph ./docs --format dot > graph.dot
 markdown-lsp graph ./docs --format mermaid
 
 # Self-contained interactive HTML with D3 force-directed graph
-# (drag, zoom, hover highlights neighbours, click to inspect)
+# (drag, zoom, hover highlights neighbours, click to inspect side-panel)
 markdown-lsp graph ./docs --format html --out graph.html
 ```
 
 JSON output shape:
 ```json
 {
-  "nodes": [{"id": "README.md", "title": "Docsbook", "charCount": 2634, "sectionsCount": 10}],
+  "nodes": [{"id": "README.md", "title": "Docsbook", "charCount": 2634, "sectionsCount": 10,
+              "sections": [...], "outgoing": [...], "incoming": [...], "topSimilar": []}],
   "edges": [{"source": "README.md", "target": "quick-start.md", "kind": "inline", "label": "Get started"}],
+  "semanticEdges": [],
   "unresolvedCount": 3
 }
 ```
+
+---
+
+## Turnkey semantic graph (v1.2)
+
+Overlay AI-powered semantic similarity edges on top of the link graph — one command, no pipeline.
+
+```bash
+# Build embeddings + interactive semantic graph in one command
+OPENROUTER_API_KEY=sk-or-... markdown-lsp graph ./docs --format html --semantic --out graph.html
+
+# With explicit thresholds
+OPENROUTER_API_KEY=sk-or-... markdown-lsp graph ./docs --format html --semantic \
+  --sim-threshold 0.75 --sim-top-k 5 --out graph.html
+```
+
+**What you get in the HTML:**
+
+- Two types of edges — **solid lines** (explicit markdown links) and **dashed amber lines** (semantic similarity)
+- **Checkboxes** in the toolbar to toggle each edge type independently
+- **Click any node** to open a side-panel showing: title, path, sections, outgoing links, incoming links, and top semantically similar pages with scores
+- Clicking a linked page in the side-panel focuses the graph on that node
+- Background click closes the panel and clears selection
+- Drag and zoom preserved from v1.1
+
+**Semantic flags:**
+
+| Flag | Default | Description |
+|---|---|---|
+| `--semantic` | off | Enable AI similarity edges |
+| `--sim-threshold` | `0.75` | Minimum cosine similarity score to draw an edge |
+| `--sim-top-k` | `5` | Max semantic neighbours per node |
+| `--model` | `openai/text-embedding-3-small` | Embedding model override |
+
+**Caching:** embeddings are cached in `.markdown-lsp-cache/embeddings/` — the second run is instant with 0 API calls.
+
+**OpenRouter model naming:** when using `OPENROUTER_API_KEY`, the model name requires the `openai/` prefix (e.g. `openai/text-embedding-3-small`). When using `AI_GATEWAY_API_KEY` (Vercel AI Gateway), use the bare name (`text-embedding-3-small`). If the model is rejected, the CLI outputs a clear hint to try the other form.
 
 ---
 
@@ -233,6 +301,7 @@ export AI_GATEWAY_API_KEY=...   # Vercel AI Gateway
 
 - **CLI** — `node:util parseArgs`, zero extra deps, reads `.md` files into an in-memory graph
 - **Graph** — pure TypeScript, no DB needed; `buildGraph(docsRoot)` walks the directory tree
+- **Semantic graph** — in-memory cosine similarity (N×N in ~5ms); embeddings via OpenRouter or Vercel AI Gateway; disk-cached per sha256(model+text)
 - **LSP** — `vscode-languageserver/node` over stdio; requires Postgres (Drizzle ORM, `mdlsp_` prefix)
 - **AI layer** (opt-in) — pgvector cosine search on canonical-term embeddings; `text-embedding-3-small` via Vercel AI Gateway
 - **Bridge** — pure in-memory search (searchText, searchTextRanked, searchSymbols, searchPaths, listPages)
@@ -255,8 +324,10 @@ pnpm test
 - **M1 — Structural layer** ✅
 - **M2 — Semantic extract** (opt-in, code present, awaiting live AI Gateway credit)
 - **M3 — CLI-first interface** ✅ (v1.0.0)
-- M4 — User overrides for the glossary (merge / split / rename / add_synonym)
-- M5 — Docsbook integration
+- **M4 — Graph export + HTML D3 visualisation** ✅ (v1.1.0)
+- **M5 — Turnkey semantic graph (graph --semantic)** ✅ (v1.2.0)
+- M6 — User overrides for the glossary (merge / split / rename / add_synonym)
+- M7 — Docsbook integration
 
 ---
 
