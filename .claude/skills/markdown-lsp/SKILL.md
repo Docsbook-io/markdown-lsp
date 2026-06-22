@@ -5,14 +5,16 @@ description: >
   Use when searching docs/ or about/, getting doc outlines, navigating markdown, finding sections,
   traversing the doc link graph, exporting a graph, doing full-text / symbol / path / semantic search
   over any markdown directory, or building a persistent semantic index to save API tokens.
-  Also covers granular semantic search (heading/line level) and the turnkey semantic graph.
+  Also covers granular semantic search (heading/line level), the turnkey semantic graph, and
+  how to keep the index fresh automatically via git hooks, a debounced watch script, or CI caching.
   Triggers: "markdown-lsp", "search docs/about", "doc outline", "navigate markdown", "doc graph",
   "links between pages", "find section in docs", "graph export", "semantic search docs",
   "embeddings search", "semantic graph", "turnkey graph", "index docs", "heading search",
-  "granularity", "token-saving search".
+  "granularity", "token-saving search", "incremental reindex", "watch docs", "git hook index",
+  "auto-update embeddings", "debounce index".
 ---
 
-# markdown-lsp CLI — Markdown search, navigation & semantic graph (v1.3.0)
+# markdown-lsp CLI — Markdown search, navigation & semantic graph (v1.3.1)
 
 Fast structural search, navigation, link-graph export, turnkey semantic graph, granular AI semantic
 search (page / heading / line), and persistent index for token-saving search over any markdown
@@ -71,6 +73,222 @@ OPENROUTER_API_KEY=sk-or-... node_modules/.bin/markdown-lsp index ./docs --granu
 ```
 
 **Cache:** `sha256(model + text)` key in `.markdown-lsp-cache/embeddings/`. Changed file = new key = auto re-embed.
+
+## Keeping the index fresh (incremental re-index)
+
+### How incremental re-index works
+
+`index ./docs` is already incremental — you can call it as often as you like without fear of wasted
+API tokens. Internally, `embedTexts()` checks `sha256(model + text)` against `.markdown-lsp-cache/embeddings/`
+before every unit. If the text is unchanged, the vector is loaded from disk; no API call is made.
+Only new or changed units are sent to the API.
+
+Concretely:
+- **Unchanged docs:** 0 API calls for doc units on every re-index. Only a query vector is ever
+  sent (1 call per `semantic-search`).
+- **One page changed:** only the units of that page are re-embedded; all other pages are cache hits.
+- **Deleted pages:** their cached vectors are never loaded again (units come from current files
+  only) — they become orphaned files on disk but have zero impact on search results.
+
+**You can call `index` regularly on a cron, in CI, or via a git hook — you pay only for what changed.**
+
+### Cache size reference
+
+| Granularity | Approx. cache size (78-page docs) |
+|---|---|
+| `page` | ~470 KB |
+| `heading` | ~3.7 MB |
+| `line` (paragraphs) | ~18.7 MB |
+
+These are fine for a local dev tool. If you want to reclaim disk space, `rm -rf .markdown-lsp-cache/`
+is safe — the cache will be rebuilt on next index/search (one API round-trip for all units).
+
+### Anti-pattern: do NOT call index in a tight loop
+
+Calling `index` on every keystroke or file-save without debouncing wastes time even when the API
+cost is zero (disk I/O + startup per call). Use one of the integration patterns below instead.
+
+---
+
+## Auto-update on changes
+
+Choose the pattern that matches your workflow, from simplest to most flexible.
+
+### RECOMMENDED: git hooks (post-merge / post-checkout / post-commit)
+
+Git hooks fire at natural batch boundaries — after a merge, branch switch, or commit — so no
+debounce logic is needed. The index is always fresh after you pull or change branches.
+
+**post-merge** (fires after `git pull` / `git merge`):
+
+```bash
+#!/bin/sh
+# .git/hooks/post-merge
+set -e
+cd "$(git rev-parse --show-toplevel)"
+echo "[markdown-lsp] Re-indexing docs after merge..."
+npx markdown-lsp index ./docs --granularity heading
+echo "[markdown-lsp] Done."
+```
+
+**post-checkout** (fires after `git checkout` / `git switch`; `$3 = 1` means branch switch):
+
+```bash
+#!/bin/sh
+# .git/hooks/post-checkout
+PREV_HEAD="$1"
+NEW_HEAD="$2"
+BRANCH_SWITCH="$3"
+if [ "$BRANCH_SWITCH" = "1" ]; then
+  cd "$(git rev-parse --show-toplevel)"
+  echo "[markdown-lsp] Branch switched, re-indexing docs..."
+  npx markdown-lsp index ./docs --granularity heading
+fi
+```
+
+**post-commit** (optional — use if you want the index updated after every local commit):
+
+```bash
+#!/bin/sh
+# .git/hooks/post-commit
+set -e
+cd "$(git rev-parse --show-toplevel)"
+npx markdown-lsp index ./docs --granularity heading
+```
+
+**Installation:**
+
+```bash
+# Make hooks executable
+chmod +x .git/hooks/post-merge .git/hooks/post-checkout
+
+# Optional: post-commit
+chmod +x .git/hooks/post-commit
+```
+
+**Using husky or lefthook?** Add to your existing config instead of editing `.git/hooks` directly:
+
+```bash
+# husky (package.json → "husky": { "hooks": { "post-merge": "npx markdown-lsp index ./docs --granularity heading" } })
+npx husky add .husky/post-merge "npx markdown-lsp index ./docs --granularity heading"
+
+# lefthook (lefthook.yml)
+# post-merge:
+#   commands:
+#     index-docs:
+#       run: npx markdown-lsp index ./docs --granularity heading
+```
+
+---
+
+### Watch script with debounce (real-time, no git required)
+
+For real-time updates while writing docs, use a debounced file-watcher. The debounce is essential
+— without it, every auto-save would trigger a separate `index` call.
+
+`chokidar` is not a dependency of `markdown-lsp` — install it in your own project if you want it,
+or use the stdlib `fs.watch` snippet below (zero deps):
+
+**Option A — stdlib `fs.watch` (zero extra dependencies):**
+
+```js
+// scripts/watch-index.mjs
+import { watch } from "node:fs"
+import { execSync } from "node:child_process"
+
+const DOCS_DIR = process.argv[2] ?? "./docs"
+const DEBOUNCE_MS = 3000  // wait 3 s after last change before re-indexing
+
+let timer = null
+
+watch(DOCS_DIR, { recursive: true }, (event, filename) => {
+  if (!filename?.endsWith(".md")) return
+  clearTimeout(timer)
+  timer = setTimeout(() => {
+    console.log(`[watch-index] ${filename} changed — re-indexing ${DOCS_DIR}...`)
+    try {
+      execSync(`npx markdown-lsp index ${DOCS_DIR} --granularity heading`, { stdio: "inherit" })
+    } catch (e) {
+      console.error("[watch-index] index failed:", e.message)
+    }
+  }, DEBOUNCE_MS)
+})
+
+console.log(`[watch-index] Watching ${DOCS_DIR} — debounce ${DEBOUNCE_MS}ms`)
+```
+
+Run in background: `node scripts/watch-index.mjs ./docs &`
+
+**Option B — chokidar (install separately: `npm install --save-dev chokidar`):**
+
+```js
+// scripts/watch-index-chokidar.mjs
+import chokidar from "chokidar"
+import { execSync } from "node:child_process"
+
+const DOCS_DIR = process.argv[2] ?? "./docs"
+const DEBOUNCE_MS = 3000
+
+let timer = null
+
+chokidar.watch(`${DOCS_DIR}/**/*.md`, { ignoreInitial: true }).on("all", (event, path) => {
+  clearTimeout(timer)
+  timer = setTimeout(() => {
+    console.log(`[watch-index] ${path} changed — re-indexing...`)
+    try {
+      execSync(`npx markdown-lsp index ${DOCS_DIR} --granularity heading`, { stdio: "inherit" })
+    } catch (e) {
+      console.error("[watch-index] index failed:", e.message)
+    }
+  }, DEBOUNCE_MS)
+})
+
+console.log(`[watch-index] Watching ${DOCS_DIR}/**/*.md — debounce ${DEBOUNCE_MS}ms`)
+```
+
+**Why 3-5 s debounce?** If you save multiple files quickly (e.g. a refactor across 10 pages), the
+timer resets on each save, and only one `index` call fires after you stop. With a 3 s debounce,
+bursts of up to ~3 s are coalesced into a single re-index.
+
+---
+
+### CI pattern: cache the index across runs
+
+For teams using GitHub Actions, cache `.markdown-lsp-cache/` keyed on the hash of your markdown
+files + the embedding model. The index survives across CI runs — only changed files are re-embedded.
+
+```yaml
+# .github/workflows/index-docs.yml
+name: Re-index docs
+on:
+  push:
+    paths:
+      - 'docs/**/*.md'
+      - 'about/**/*.md'
+
+jobs:
+  index:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore embedding cache
+        uses: actions/cache@v4
+        with:
+          path: .markdown-lsp-cache
+          key: mlsp-${{ hashFiles('docs/**/*.md', 'about/**/*.md') }}-${{ env.EMBEDDING_MODEL || 'default' }}
+          restore-keys: |
+            mlsp-
+
+      - name: Re-index docs (incremental — only changed files cost tokens)
+        run: npx markdown-lsp index ./docs --granularity heading
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+```
+
+On a cache hit (no markdown files changed), the `index` step runs with 0 API calls. On a partial
+hit (some files changed), only those are re-embedded. On a full miss (first run or model change),
+the full index is built and saved for the next run.
 
 ## Granular semantic search (v1.3 — NEW)
 
