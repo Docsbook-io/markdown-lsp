@@ -10,7 +10,7 @@ import {
 } from "./bridge/index.js"
 
 const USAGE = `
-markdown-lsp v1.2.0 — CLI for querying Markdown documentation graphs
+markdown-lsp v1.2.1 — CLI for querying Markdown documentation graphs
 
 USAGE
   markdown-lsp <subcommand> [options]
@@ -826,11 +826,251 @@ async function main(): Promise<void> {
     process.exit(0)
   }
 
-  // LSP subcommand
+  // LSP subcommand — check for --help/-h before starting the server
   if (subcommand === "lsp" || subcommand === "serve") {
+    if (rest.includes("--help") || rest.includes("-h")) {
+      process.stdout.write(`lsp [--stdio]\nserve [--stdio]\n\n  Start the LSP stdio server for editor integration.\n\n  Options:\n    --stdio         Use stdio transport (default and recommended)\n\n  Note: back-compat — --stdio | --node-ipc | --socket=<n> as first arg\n  also starts the LSP server.\n\n  Examples:\n    markdown-lsp lsp --stdio\n    markdown-lsp serve --stdio\n`)
+      process.exit(0)
+    }
     await startLspServer()
     return
   }
+
+  // Per-subcommand help strings
+  const SUB_USAGE: Record<string, string> = {
+    "workspace-outline": `
+workspace-outline <docs-dir> [--prefix <p>] [--limit <n>]
+
+  List all pages in the workspace with metadata.
+
+  Arguments:
+    <docs-dir>      Path to the documentation directory
+
+  Options:
+    --prefix <p>    Filter pages whose path starts with <p>
+    --limit <n>     Return at most <n> results
+    --pretty        Pretty-print JSON output
+
+  Examples:
+    markdown-lsp workspace-outline ./docs
+    markdown-lsp workspace-outline ./docs --prefix api/ --limit 20
+`.trim(),
+
+    "outline": `
+outline <docs-dir> <page>
+
+  Show the heading outline of a single page.
+
+  Arguments:
+    <docs-dir>      Path to the documentation directory
+    <page>          Relative path to the page (e.g. introduction.md)
+
+  Options:
+    --pretty        Pretty-print JSON output
+
+  Examples:
+    markdown-lsp outline ./docs introduction.md
+`.trim(),
+
+    "search-text": `
+search-text <docs-dir> <query> [--mode ranked|verbatim] [--regex]
+            [--case-sensitive] [--prefix <p>] [--limit <n>] [--context <n>]
+
+  Full-text search across all pages.
+
+  Arguments:
+    <docs-dir>           Path to the documentation directory
+    <query>              Search query (natural language or pattern)
+
+  Options:
+    --mode ranked        Natural-language ranked search (default)
+    --mode verbatim      Exact substring search
+    --regex              Treat query as a regular expression
+    --case-sensitive     Case-sensitive matching
+    --prefix <p>         Filter pages whose path starts with <p>
+    --limit <n>          Return at most <n> results
+    --context <n>        Characters of context around each match
+    --pretty             Pretty-print JSON output
+
+  Examples:
+    markdown-lsp search-text ./docs "getting started"
+    markdown-lsp search-text ./docs "webhook signing" --mode verbatim --limit 5
+    markdown-lsp search-text ./docs "auth.*token" --regex
+`.trim(),
+
+    "search-symbols": `
+search-symbols <docs-dir> <query> [--limit <n>]
+
+  Fuzzy subsequence search across all headings.
+
+  Arguments:
+    <docs-dir>      Path to the documentation directory
+    <query>         Heading search query
+
+  Options:
+    --limit <n>     Return at most <n> results
+    --pretty        Pretty-print JSON output
+
+  Examples:
+    markdown-lsp search-symbols ./docs "webhook" --limit 10
+`.trim(),
+
+    "search-paths": `
+search-paths <docs-dir> <glob>
+
+  List pages whose paths match a glob pattern (*, **, ?).
+
+  Arguments:
+    <docs-dir>      Path to the documentation directory
+    <glob>          Glob pattern to match against page paths
+
+  Options:
+    --pretty        Pretty-print JSON output
+
+  Examples:
+    markdown-lsp search-paths ./docs "ai/*.md"
+    markdown-lsp search-paths ./docs "**/*auth*"
+`.trim(),
+
+    "links-to": `
+links-to <docs-dir> <page>
+
+  Show all pages that link to <page>.
+
+  Arguments:
+    <docs-dir>      Path to the documentation directory
+    <page>          Relative path to the target page
+
+  Options:
+    --pretty        Pretty-print JSON output
+
+  Examples:
+    markdown-lsp links-to ./docs quick-start.md
+`.trim(),
+
+    "links-from": `
+links-from <docs-dir> <page>
+
+  Show all links that originate from <page>.
+
+  Arguments:
+    <docs-dir>      Path to the documentation directory
+    <page>          Relative path to the source page
+
+  Options:
+    --pretty        Pretty-print JSON output
+
+  Examples:
+    markdown-lsp links-from ./docs README.md
+`.trim(),
+
+    "resolve-link": `
+resolve-link <docs-dir> <from-page> <link-text>
+
+  Resolve a specific link text from a given page.
+
+  Arguments:
+    <docs-dir>      Path to the documentation directory
+    <from-page>     Relative path to the source page
+    <link-text>     Exact link text to resolve
+
+  Options:
+    --pretty        Pretty-print JSON output
+
+  Examples:
+    markdown-lsp resolve-link ./docs README.md "Getting Started"
+`.trim(),
+
+    "get-section": `
+get-section <docs-dir> <page> <anchor>
+
+  Retrieve a section by its anchor slug.
+
+  Arguments:
+    <docs-dir>      Path to the documentation directory
+    <page>          Relative path to the page
+    <anchor>        Section anchor slug (e.g. "quick-links")
+
+  Options:
+    --pretty        Pretty-print JSON output
+
+  Examples:
+    markdown-lsp get-section ./docs overview.md "quick-links"
+`.trim(),
+
+    "graph": `
+graph <docs-dir> [--format json|dot|mermaid|html] [--out <file>]
+      [--semantic] [--sim-threshold <0-1>] [--sim-top-k <n>]
+      [--model <embedding-model>]
+
+  Export the documentation link graph.
+
+  Arguments:
+    <docs-dir>              Path to the documentation directory
+
+  Options:
+    --format json           JSON output with nodes/edges (default)
+    --format dot            Graphviz DOT format
+    --format mermaid        Mermaid diagram format
+    --format html           Self-contained interactive D3 visualisation
+    --out <file>            Write output to file instead of stdout
+    --semantic              Overlay AI-powered similarity edges
+    --sim-threshold <0-1>   Minimum cosine similarity (default: 0.75)
+    --sim-top-k <n>         Max semantic neighbours per node (default: 5)
+    --model <model>         Embedding model override
+    --pretty                Pretty-print JSON output
+
+  Note: --semantic requires OPENROUTER_API_KEY or AI_GATEWAY_API_KEY.
+
+  Examples:
+    markdown-lsp graph ./docs --format json --pretty
+    markdown-lsp graph ./docs --format html --out graph.html
+    markdown-lsp graph ./docs --format dot | dot -Tsvg > graph.svg
+    markdown-lsp graph ./docs --format html --semantic --out graph.html
+`.trim(),
+
+    "semantic-search": `
+semantic-search <docs-dir> <query> [--limit <n>] [--model <embedding-model>]
+
+  AI-powered semantic search using embeddings.
+
+  Arguments:
+    <docs-dir>      Path to the documentation directory
+    <query>         Natural-language search query
+
+  Options:
+    --limit <n>     Return at most <n> results (default: 10)
+    --model <m>     Embedding model override
+    --pretty        Pretty-print JSON output
+
+  Note: requires OPENROUTER_API_KEY or AI_GATEWAY_API_KEY.
+  Default embedding model: openai/text-embedding-3-small.
+  Results are cached in .markdown-lsp-cache/.
+
+  Examples:
+    markdown-lsp semantic-search ./docs "how to set up webhooks" --limit 5
+    markdown-lsp semantic-search ./docs "authentication" --model openai/text-embedding-3-small
+`.trim(),
+
+    "lsp": `
+lsp [--stdio]
+serve [--stdio]
+
+  Start the LSP stdio server for editor integration.
+
+  Options:
+    --stdio         Use stdio transport (default and recommended)
+
+  Note: back-compat — --stdio | --node-ipc | --socket=<n> as first arg
+  also starts the LSP server.
+
+  Examples:
+    markdown-lsp lsp --stdio
+    markdown-lsp serve --stdio
+`.trim(),
+  }
+  // Alias: "serve" shares lsp help
+  SUB_USAGE["serve"] = SUB_USAGE["lsp"]!
 
   // Parse global flags from the remaining args
   let pretty = false
@@ -838,6 +1078,17 @@ async function main(): Promise<void> {
   for (const arg of rest) {
     if (arg === "--pretty") pretty = true
     else filteredRest.push(arg)
+  }
+
+  // Per-subcommand --help / -h: intercept before parseArgs sees it
+  if (filteredRest.includes("--help") || filteredRest.includes("-h")) {
+    const subUsage = SUB_USAGE[subcommand]
+    if (subUsage) {
+      process.stdout.write(subUsage + "\n")
+    } else {
+      process.stdout.write(USAGE + "\n")
+    }
+    process.exit(0)
   }
 
   switch (subcommand) {
