@@ -1,5 +1,41 @@
 # Changelog
 
+## 1.4.0 — 2026-06-22
+
+### New: Claude Code skill install via `npx skills add`
+
+Install the markdown-lsp Claude Code skill directly from GitHub:
+
+```bash
+npx skills add Docsbook-io/markdown-lsp
+```
+
+The skill is now installable by the `vercel-labs/skills` CLI — it finds the skill in
+`.claude/skills/markdown-lsp/` automatically. Tested and verified: SKILL.md and reference.md
+are copied into `.claude/skills/markdown-lsp/` in the target project.
+
+### New: Interactive onboarding in SKILL.md
+
+Added `## Setup (interactive onboarding)` section to SKILL.md — a 6-step guided flow the AI
+runs in chat when the user says "set up markdown-lsp" or similar:
+
+1. Locate and verify the docs folder
+2. Check / explain `OPENROUTER_API_KEY`
+3. Choose granularity (page / heading / line) with trade-off explanation
+4. Build the first semantic index (warm the cache)
+5. Install git hooks for auto-reindex (post-merge / post-checkout)
+6. Generate the interactive semantic graph as a wow moment
+
+### Updated: README Quick Start
+
+Added "Quick Start with Claude Code (skill)" section to README immediately after the CLI Quick
+Start — install command, example prompts, and pointer to the interactive setup flow.
+
+### Updated: Frontmatter triggers
+
+Added setup/onboarding triggers to SKILL.md frontmatter so the skill activates on natural
+phrases like "set up markdown-lsp", "configure semantic search", "onboard markdown-lsp".
+
 ## 0.2.0 — 2026-05-24
 
 ### New: RichDocGraph in `markdown-lsp/bridge`

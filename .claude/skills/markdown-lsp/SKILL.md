@@ -7,14 +7,19 @@ description: >
   over any markdown directory, or building a persistent semantic index to save API tokens.
   Also covers granular semantic search (heading/line level), the turnkey semantic graph, and
   how to keep the index fresh automatically via git hooks, a debounced watch script, or CI caching.
+  Includes interactive onboarding: guides the user through docs folder setup, API key, granularity
+  choice, first index build, git hook installation, and semantic graph generation.
   Triggers: "markdown-lsp", "search docs/about", "doc outline", "navigate markdown", "doc graph",
   "links between pages", "find section in docs", "graph export", "semantic search docs",
   "embeddings search", "semantic graph", "turnkey graph", "index docs", "heading search",
   "granularity", "token-saving search", "incremental reindex", "watch docs", "git hook index",
-  "auto-update embeddings", "debounce index".
+  "auto-update embeddings", "debounce index",
+  "set up markdown-lsp", "configure markdown-lsp", "onboard markdown-lsp",
+  "configure semantic search", "setup semantic search", "install markdown-lsp skill",
+  "get started with markdown-lsp", "markdown-lsp setup".
 ---
 
-# markdown-lsp CLI — Markdown search, navigation & semantic graph (v1.3.1)
+# markdown-lsp CLI — Markdown search, navigation & semantic graph (v1.4.0)
 
 Fast structural search, navigation, link-graph export, turnkey semantic graph, granular AI semantic
 search (page / heading / line), and persistent index for token-saving search over any markdown
@@ -378,3 +383,131 @@ OPENROUTER_API_KEY=sk-or-... node_modules/.bin/markdown-lsp graph ./docs --forma
 ```
 
 For full JSON return shapes and all flags, see `reference.md`.
+
+---
+
+## Setup (interactive onboarding)
+
+When the user says "set up markdown-lsp", "configure", "onboard", "install markdown-lsp", or
+"get started with markdown-lsp" — run this 6-step interactive flow. Ask questions one at a time
+and wait for the answer before proceeding. Be concise: one question per message.
+
+### Step 1 — Locate the docs folder
+
+Ask: "Where is your docs folder? (e.g. `./docs`, `./content`, `./pages`)"
+
+Then verify it works:
+```bash
+npx markdown-lsp workspace-outline <docs-dir> --limit 5
+```
+If the command fails or returns 0 pages, help the user fix the path before continuing.
+If it succeeds, show the page count and move on.
+
+### Step 2 — Check OPENROUTER_API_KEY
+
+Ask: "Do you want semantic search and the semantic graph? They use an embedding model via
+OpenRouter (free tier available at openrouter.ai)."
+
+If yes:
+```bash
+echo $OPENROUTER_API_KEY
+```
+If the variable is empty, explain: "Get a free key at https://openrouter.ai/keys, then run:
+`export OPENROUTER_API_KEY=sk-or-...` (or add it to your `.env` file — never commit the key)."
+Wait until the user confirms the key is set before continuing.
+
+If no: skip Steps 3–6 and summarise what works without a key (structural search, link graph).
+
+### Step 3 — Choose granularity
+
+Ask: "How granular do you want semantic search?
+
+- **page** (fastest, default) — matches whole pages; cheapest first run
+- **heading** — matches individual sections; best precision for most docs
+- **line** — matches paragraph blocks; finest but slowest first run
+
+Which do you prefer? (default: heading)"
+
+Default to `heading` if unsure. Explain trade-offs only if asked.
+
+### Step 4 — Build the first semantic index
+
+Run:
+```bash
+OPENROUTER_API_KEY=<key> npx markdown-lsp index <docs-dir> --granularity <choice>
+```
+Show the output. Explain: "This caches all embeddings locally in `.markdown-lsp-cache/`.
+Every re-run is free if docs haven't changed — you only pay for what's new or modified."
+
+### Step 5 — Offer a git hook for auto-reindex
+
+Ask: "Set up a git hook to automatically re-index after `git pull` or branch switches?
+I'll show you exactly what will be created."
+
+If yes, write these two files (replace `<docs-dir>` with the actual path):
+
+`.git/hooks/post-merge`:
+```bash
+#!/bin/sh
+# .git/hooks/post-merge — auto-reindex docs after git pull / git merge
+set -e
+cd "$(git rev-parse --show-toplevel)"
+echo "[markdown-lsp] Re-indexing docs after merge..."
+npx markdown-lsp index <docs-dir> --granularity <choice>
+echo "[markdown-lsp] Done."
+```
+
+`.git/hooks/post-checkout`:
+```bash
+#!/bin/sh
+# .git/hooks/post-checkout — auto-reindex docs after branch switch
+# $3 = 1 means branch switch, 0 = file checkout
+BRANCH_SWITCH="$3"
+if [ "$BRANCH_SWITCH" = "1" ]; then
+  cd "$(git rev-parse --show-toplevel)"
+  echo "[markdown-lsp] Branch switched, re-indexing docs..."
+  npx markdown-lsp index <docs-dir> --granularity <choice>
+  echo "[markdown-lsp] Done."
+fi
+```
+
+Then make them executable:
+```bash
+chmod +x .git/hooks/post-merge .git/hooks/post-checkout
+```
+
+Confirm to the user what was created and that the hooks will fire automatically going forward.
+
+### Step 6 — Generate the semantic graph (wow moment)
+
+Ask: "Want to generate an interactive semantic graph of your docs? It shows links AND semantic
+similarity between pages — opens in your browser."
+
+If yes:
+```bash
+OPENROUTER_API_KEY=<key> npx markdown-lsp graph <docs-dir> --format html --semantic \
+  --granularity <heading|page> --out docs-graph.html
+```
+Then open it:
+```bash
+open docs-graph.html        # macOS
+# or: xdg-open docs-graph.html  # Linux
+```
+Explain: "Solid lines = explicit markdown links. Dashed amber = semantic similarity.
+Click any node to see its sections, links, and top similar pages."
+
+### After onboarding — summary
+
+Once all steps are done, summarise what was set up:
+- Docs folder confirmed: `<docs-dir>`
+- Semantic index built at `<granularity>` granularity
+- Git hooks installed (if chosen): auto-reindex on merge/checkout
+- Semantic graph generated (if chosen): `docs-graph.html`
+
+Then suggest first things to try:
+```
+"search my docs semantically for 'how to configure webhooks'"
+"find which pages link to getting-started.md"
+"show me a heading-level semantic search for 'rate limiting'"
+"rebuild the semantic graph after I update my docs"
+```
