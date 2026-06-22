@@ -10,7 +10,7 @@ import {
 } from "./bridge/index.js"
 
 const USAGE = `
-markdown-lsp v1.2.1 — CLI for querying Markdown documentation graphs
+markdown-lsp v1.3.0 — CLI for querying Markdown documentation graphs
 
 USAGE
   markdown-lsp <subcommand> [options]
@@ -45,9 +45,17 @@ SUBCOMMANDS
   get-section <docs-dir> <page> <anchor>
       Retrieve a section by its anchor slug.
 
+  index <docs-dir> [--granularity page|heading|line] [--model <m>]
+      Build the persistent semantic index once — embeds all units at the
+      chosen granularity and writes them to .markdown-lsp-cache/.
+      Subsequent semantic-search / graph --semantic calls reuse the cache,
+      so they only embed the query (1 API round-trip instead of N).
+      Idempotent: re-running without doc changes costs 0 API calls.
+      Requires OPENROUTER_API_KEY or AI_GATEWAY_API_KEY.
+
   graph <docs-dir> [--format json|dot|mermaid|html] [--out <file>]
-        [--semantic] [--sim-threshold <0-1>] [--sim-top-k <n>]
-        [--model <embedding-model>]
+        [--semantic] [--granularity page|heading] [--sim-threshold <0-1>]
+        [--sim-top-k <n>] [--model <embedding-model>]
       Export the doc link graph. Default format: json (nodes/edges).
       Use --format html for a self-contained interactive D3 visualisation.
       Use --out <file> to write to disk instead of stdout.
@@ -56,14 +64,20 @@ SUBCOMMANDS
       semantic edges are shown in the HTML graph with checkboxes to
       toggle each type. Clicking a node opens a side-panel with full
       info and highlights all its connections.
+        --granularity    page (default) or heading (nodes = sections)
         --sim-threshold  Minimum cosine similarity for a semantic edge (default: 0.75)
         --sim-top-k      Maximum semantic neighbours per node (default: 5)
         --model          Embedding model override (default: openai/text-embedding-3-small)
+      Note: --granularity line is NOT supported for graph (too many nodes).
 
   semantic-search <docs-dir> <query> [--limit <n>] [--model <embedding-model>]
+                  [--granularity page|heading|line]
       AI-powered semantic search using embeddings. Requires OPENROUTER_API_KEY
       (or AI_GATEWAY_API_KEY). Results are cached in .markdown-lsp-cache/.
       Default embedding model: openai/text-embedding-3-small
+        --granularity page    Search whole pages (default, fast)
+        --granularity heading Search within sections (returns anchor + headingPath)
+        --granularity line    Search paragraph blocks (returns line number)
 
   lsp [--stdio]
   serve [--stdio]
@@ -98,14 +112,23 @@ EXAMPLES
   # Find pages by filename glob
   markdown-lsp search-paths ./docs "ai/*.md"
 
+  # Build the semantic index once (saves tokens on every later search)
+  markdown-lsp index ./docs --granularity heading
+
+  # Semantic search — heading level (returns anchor + section)
+  markdown-lsp semantic-search ./docs "how does auth work" --granularity heading --limit 10
+
+  # Semantic search — paragraph level (returns line number)
+  markdown-lsp semantic-search ./docs "rate limit error" --granularity line --limit 5
+
   # Link graph
   markdown-lsp graph ./docs --format json --pretty
   markdown-lsp graph ./docs --format html --out graph.html
   markdown-lsp graph ./docs --format dot | dot -Tsvg > graph.svg
   markdown-lsp graph ./docs --format mermaid
 
-  # Build embeddings + interactive semantic graph in one command
-  markdown-lsp graph ./docs --format html --semantic --out graph.html
+  # Semantic graph — heading-level nodes (sections as nodes)
+  markdown-lsp graph ./docs --format html --semantic --granularity heading --out graph-headings.html
   markdown-lsp graph ./docs --format html --semantic --sim-threshold 0.75 --sim-top-k 5 --out graph.html
 
   # Backlinks / outgoing links
@@ -115,10 +138,6 @@ EXAMPLES
   # Resolve / read
   markdown-lsp resolve-link ./docs README.md "Getting Started"
   markdown-lsp get-section ./docs overview.md "quick-links"
-
-  # Semantic search (AI)
-  markdown-lsp semantic-search ./docs "how to set up webhooks" --limit 5
-  markdown-lsp semantic-search ./docs "authentication" --model openai/text-embedding-3-small
 
   # LSP server
   markdown-lsp lsp --stdio
@@ -140,6 +159,12 @@ interface GraphNode {
   title: string
   charCount: number
   sectionsCount: number
+  /** "page" (default) or "heading" (this node represents a section) */
+  nodeType?: "page" | "heading"
+  /** For heading-nodes: the full heading breadcrumb path */
+  headingPath?: string[]
+  /** For heading-nodes: the page this section belongs to */
+  pagePath?: string
   // Side-panel data
   sections: Array<{ anchor: string | null; headingPath: string[]; level: number }>
   outgoing: Array<{ target: string; label: string | null; kind: string }>
@@ -238,22 +263,22 @@ async function addSemanticEdges(
   modelOverride: string | undefined,
   simThreshold: number,
   simTopK: number,
+  granularity: "page" | "heading" = "page",
 ): Promise<void> {
   const { assertApiKey } = await import("./ai/config.js")
   assertApiKey()
 
   const { embedTexts } = await import("./ai/embeddings.js")
+  const { unitize } = await import("./ai/granular.js")
 
-  const pageTexts = pages.map((p) => {
-    const titlePart = p.title ? p.title + "\n\n" : ""
-    return titlePart + p.content.slice(0, 2000)
-  })
+  const units = unitize(pages, granularity)
 
   process.stderr.write(
-    `[markdown-lsp] Embedding ${pages.length} pages` +
+    `[markdown-lsp] Embedding ${units.length} units at granularity="${granularity}"` +
     ` (model: ${modelOverride ?? "openai/text-embedding-3-small"})...\n`
   )
-  const { vectors, tokensUsed } = await embedTexts(pageTexts, modelOverride, true)
+  const unitTexts = units.map((u) => u.text)
+  const { vectors, tokensUsed } = await embedTexts(unitTexts, modelOverride, true)
   if (tokensUsed > 0) {
     process.stderr.write(`[markdown-lsp] Embeddings computed (${tokensUsed} tokens used).\n`)
   } else {
@@ -262,44 +287,132 @@ async function addSemanticEdges(
 
   const semanticEdges: SemanticEdge[] = []
 
-  for (let i = 0; i < pages.length; i++) {
-    const vecI = vectors[i]
-    if (!vecI) continue
+  if (granularity === "heading") {
+    // Heading mode: nodes are sections, semantic edges between sections
+    // data.nodes at this point are page-nodes — for heading mode we REPLACE them with section-nodes
+    const sectionNodes: GraphNode[] = []
+    const sectionNodeMap = new Map<string, GraphNode>()
 
-    // Compute similarity to all other pages
-    const sims: Array<{ j: number; score: number }> = []
-    for (let j = 0; j < pages.length; j++) {
-      if (j === i) continue
-      const vecJ = vectors[j]
-      if (!vecJ) continue
-      const score = cosineSim(vecI, vecJ)
-      if (score >= simThreshold) {
-        sims.push({ j, score })
+    for (const page of pages) {
+      for (const s of page.sections) {
+        const anchor = s.anchor ?? "section"
+        const nodeId = `${page.path}#${anchor}`
+        const label = s.headingPath[s.headingPath.length - 1] ?? anchor
+        const sectionNode: GraphNode = {
+          id: nodeId,
+          title: label,
+          charCount: s.charCount,
+          sectionsCount: 0,
+          nodeType: "heading",
+          headingPath: s.headingPath,
+          pagePath: page.path,
+          sections: [],
+          outgoing: [],
+          incoming: [],
+          topSimilar: [],
+        }
+        sectionNodes.push(sectionNode)
+        sectionNodeMap.set(nodeId, sectionNode)
       }
     }
 
-    // topSimilar for side panel (no i<j constraint, full ranking)
-    const topSimilar = [...sims]
-      .sort((a, b) => b.score - a.score)
-      .slice(0, simTopK)
-      .map(({ j, score }) => ({
-        path: pages[j]!.path,
-        title: pages[j]!.title,
-        score: Math.round(score * 10000) / 10000,
-      }))
+    // Rebuild link edges at page level (project page links onto their first section)
+    const sectionEdges: GraphEdge[] = []
+    for (const e of data.edges) {
+      // find first section of source and target pages
+      const srcPage = pages.find((p) => p.path === e.source)
+      const tgtPage = pages.find((p) => p.path === e.target)
+      if (!srcPage || !tgtPage) continue
+      const srcSec = srcPage.sections[0]
+      const tgtSec = tgtPage.sections[0]
+      if (!srcSec || !tgtSec) continue
+      const srcId = `${srcPage.path}#${srcSec.anchor ?? "section"}`
+      const tgtId = `${tgtPage.path}#${tgtSec.anchor ?? "section"}`
+      sectionEdges.push({ source: srcId, target: tgtId, kind: e.kind, label: e.label })
+      sectionNodeMap.get(srcId)?.outgoing.push({ target: tgtId, label: e.label ?? null, kind: e.kind })
+      sectionNodeMap.get(tgtId)?.incoming.push({ source: srcId, label: e.label ?? null, kind: e.kind })
+    }
 
-    const node = data.nodes.find((n) => n.id === pages[i]!.path)
-    if (node) node.topSimilar = topSimilar
+    data.nodes = sectionNodes
+    data.edges = sectionEdges
 
-    // Semantic edges: de-dup using i<j to avoid duplicates
-    for (const { j, score } of sims) {
-      if (j > i) {
-        semanticEdges.push({
-          source: pages[i]!.path,
-          target: pages[j]!.path,
+    // Compute semantic edges between section-units
+    for (let i = 0; i < units.length; i++) {
+      const vecI = vectors[i]
+      if (!vecI) continue
+
+      const sims: Array<{ j: number; score: number }> = []
+      for (let j = 0; j < units.length; j++) {
+        if (j === i) continue
+        const vecJ = vectors[j]
+        if (!vecJ) continue
+        const score = cosineSim(vecI, vecJ)
+        if (score >= simThreshold) {
+          sims.push({ j, score })
+        }
+      }
+
+      const topSimilar = [...sims]
+        .sort((a, b) => b.score - a.score)
+        .slice(0, simTopK)
+        .map(({ j, score }) => ({
+          path: units[j]!.id,
+          title: units[j]!.headingPath?.join(" > ") ?? units[j]!.id,
           score: Math.round(score * 10000) / 10000,
-          kind: "semantic",
-        })
+        }))
+
+      const node = sectionNodeMap.get(units[i]!.id)
+      if (node) node.topSimilar = topSimilar
+
+      for (const { j, score } of sims) {
+        if (j > i) {
+          semanticEdges.push({
+            source: units[i]!.id,
+            target: units[j]!.id,
+            score: Math.round(score * 10000) / 10000,
+            kind: "semantic",
+          })
+        }
+      }
+    }
+  } else {
+    // Page mode: original behaviour
+    for (let i = 0; i < units.length; i++) {
+      const vecI = vectors[i]
+      if (!vecI) continue
+
+      const sims: Array<{ j: number; score: number }> = []
+      for (let j = 0; j < units.length; j++) {
+        if (j === i) continue
+        const vecJ = vectors[j]
+        if (!vecJ) continue
+        const score = cosineSim(vecI, vecJ)
+        if (score >= simThreshold) {
+          sims.push({ j, score })
+        }
+      }
+
+      const topSimilar = [...sims]
+        .sort((a, b) => b.score - a.score)
+        .slice(0, simTopK)
+        .map(({ j, score }) => ({
+          path: pages[j]!.path,
+          title: pages[j]!.title,
+          score: Math.round(score * 10000) / 10000,
+        }))
+
+      const node = data.nodes.find((n) => n.id === pages[i]!.path)
+      if (node) node.topSimilar = topSimilar
+
+      for (const { j, score } of sims) {
+        if (j > i) {
+          semanticEdges.push({
+            source: pages[i]!.path,
+            target: pages[j]!.path,
+            score: Math.round(score * 10000) / 10000,
+            kind: "semantic",
+          })
+        }
       }
     }
   }
@@ -307,7 +420,7 @@ async function addSemanticEdges(
   data.semanticEdges = semanticEdges
   process.stderr.write(
     `[markdown-lsp] ${semanticEdges.length} semantic edges` +
-    ` (threshold=${simThreshold}, topK=${simTopK}).\n`
+    ` (threshold=${simThreshold}, topK=${simTopK}, granularity=${granularity}).\n`
   )
 }
 
@@ -353,14 +466,15 @@ function renderGraphMermaid(data: GraphExport): string {
   return lines.join('\n')
 }
 
-function renderGraphHtml(data: GraphExport, docsDir: string, hasSemantic: boolean): string {
+function renderGraphHtml(data: GraphExport, docsDir: string, hasSemantic: boolean, granularity: "page" | "heading" = "page"): string {
   const title = docsDir.split('/').filter(Boolean).pop() ?? docsDir
+  const granularityLabel = granularity === "heading" ? " (sections)" : ""
   const jsonData = JSON.stringify(data)
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Doc Graph — ${title}</title>
+<title>Doc Graph — ${title}${granularityLabel}</title>
 <script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -423,7 +537,7 @@ function renderGraphHtml(data: GraphExport, docsDir: string, hasSemantic: boolea
 </head>
 <body>
 <div id="toolbar">
-  <h1>Doc Graph — ${title}</h1>
+  <h1>Doc Graph — ${title}${granularityLabel}</h1>
   <span id="stats"></span>
   <label class="toggle-label toggle-links" title="Toggle link edges (solid lines)">
     <input type="checkbox" id="chk-links" checked> Links
@@ -622,8 +736,12 @@ document.getElementById('panel-close').addEventListener('click', () => {
 
 function openPanel(d) {
   panelTitle.textContent = d.title;
-  panelPath.textContent  = d.id;
-  panelStats.textContent = d.charCount.toLocaleString()+' chars · '+d.sectionsCount+' sections';
+  panelPath.textContent  = d.nodeType === 'heading'
+    ? (d.headingPath && d.headingPath.length > 1 ? d.headingPath.join(' › ') : d.id)
+    : d.id;
+  panelStats.textContent = d.nodeType === 'heading'
+    ? (d.pagePath ? 'section of: '+d.pagePath+' · '+d.charCount.toLocaleString()+' chars' : d.charCount.toLocaleString()+' chars')
+    : d.charCount.toLocaleString()+' chars · '+d.sectionsCount+' sections';
   panelBody.innerHTML = '';
 
   // Sections
@@ -1000,8 +1118,8 @@ get-section <docs-dir> <page> <anchor>
 
     "graph": `
 graph <docs-dir> [--format json|dot|mermaid|html] [--out <file>]
-      [--semantic] [--sim-threshold <0-1>] [--sim-top-k <n>]
-      [--model <embedding-model>]
+      [--semantic] [--granularity page|heading] [--sim-threshold <0-1>]
+      [--sim-top-k <n>] [--model <embedding-model>]
 
   Export the documentation link graph.
 
@@ -1015,22 +1133,28 @@ graph <docs-dir> [--format json|dot|mermaid|html] [--out <file>]
     --format html           Self-contained interactive D3 visualisation
     --out <file>            Write output to file instead of stdout
     --semantic              Overlay AI-powered similarity edges
+    --granularity page      Graph nodes = pages (default)
+    --granularity heading   Graph nodes = sections (heading-level)
     --sim-threshold <0-1>   Minimum cosine similarity (default: 0.75)
     --sim-top-k <n>         Max semantic neighbours per node (default: 5)
     --model <model>         Embedding model override
     --pretty                Pretty-print JSON output
 
   Note: --semantic requires OPENROUTER_API_KEY or AI_GATEWAY_API_KEY.
+  Note: --granularity line is NOT supported for graph (too many nodes);
+        use page or heading.
 
   Examples:
     markdown-lsp graph ./docs --format json --pretty
     markdown-lsp graph ./docs --format html --out graph.html
     markdown-lsp graph ./docs --format dot | dot -Tsvg > graph.svg
     markdown-lsp graph ./docs --format html --semantic --out graph.html
+    markdown-lsp graph ./docs --format html --semantic --granularity heading --out graph-headings.html
 `.trim(),
 
     "semantic-search": `
 semantic-search <docs-dir> <query> [--limit <n>] [--model <embedding-model>]
+                [--granularity page|heading|line]
 
   AI-powered semantic search using embeddings.
 
@@ -1039,17 +1163,51 @@ semantic-search <docs-dir> <query> [--limit <n>] [--model <embedding-model>]
     <query>         Natural-language search query
 
   Options:
-    --limit <n>     Return at most <n> results (default: 10)
-    --model <m>     Embedding model override
-    --pretty        Pretty-print JSON output
+    --limit <n>           Return at most <n> results (default: 10)
+    --model <m>           Embedding model override
+    --granularity page    Search whole pages (default)
+    --granularity heading Search within sections (returns anchor + headingPath)
+    --granularity line    Search paragraph blocks (returns line number)
+    --pretty              Pretty-print JSON output
 
   Note: requires OPENROUTER_API_KEY or AI_GATEWAY_API_KEY.
   Default embedding model: openai/text-embedding-3-small.
   Results are cached in .markdown-lsp-cache/.
+  Run "index" first to pre-warm the cache (saves tokens on repeated searches).
 
   Examples:
     markdown-lsp semantic-search ./docs "how to set up webhooks" --limit 5
     markdown-lsp semantic-search ./docs "authentication" --model openai/text-embedding-3-small
+    markdown-lsp semantic-search ./docs "webhook auth" --granularity heading --limit 10
+    markdown-lsp semantic-search ./docs "rate limit error" --granularity line --limit 5
+`.trim(),
+
+    "index": `
+index <docs-dir> [--granularity page|heading|line] [--model <embedding-model>]
+
+  Build the persistent semantic index — embeds all doc units at the chosen
+  granularity and caches them to .markdown-lsp-cache/. Subsequent
+  semantic-search and graph --semantic calls reuse the cache and only
+  embed the query (1 API call instead of N).
+
+  Idempotent: re-running without doc changes costs 0 API calls (all hits).
+  Changed files are re-embedded automatically (cache key = sha256(model+text)).
+
+  Arguments:
+    <docs-dir>      Path to the documentation directory
+
+  Options:
+    --granularity page     Index whole pages (default)
+    --granularity heading  Index sections (recommended for precision)
+    --granularity line     Index paragraph blocks
+    --model <m>            Embedding model override
+    --pretty               Pretty-print progress JSON
+
+  Note: requires OPENROUTER_API_KEY or AI_GATEWAY_API_KEY.
+
+  Examples:
+    markdown-lsp index ./docs --granularity heading
+    markdown-lsp index ./docs --granularity line --model openai/text-embedding-3-small
 `.trim(),
 
     "lsp": `
@@ -1069,7 +1227,7 @@ serve [--stdio]
     markdown-lsp serve --stdio
 `.trim(),
   }
-  // Alias: "serve" shares lsp help
+  // Aliases
   SUB_USAGE["serve"] = SUB_USAGE["lsp"]!
 
   // Parse global flags from the remaining args
@@ -1254,6 +1412,7 @@ serve [--stdio]
           format: { type: "string" },
           out: { type: "string" },
           semantic: { type: "boolean" },
+          granularity: { type: "string" },
           "sim-threshold": { type: "string" },
           "sim-top-k": { type: "string" },
           model: { type: "string" },
@@ -1263,6 +1422,14 @@ serve [--stdio]
       const docsDir = positionals[0] ?? die("graph requires <docs-dir>")
       const format = (values.format ?? "json") as "json" | "dot" | "mermaid" | "html"
       const semantic = values.semantic ?? false
+      const rawGranularity = values.granularity ?? "page"
+      if (rawGranularity === "line") {
+        process.stderr.write(
+          "Error: --granularity line is not supported for graph (too many nodes — use page or heading).\n"
+        )
+        process.exit(1)
+      }
+      const granularity = rawGranularity as "page" | "heading"
       const simThreshold = values["sim-threshold"] !== undefined
         ? parseFloat(values["sim-threshold"])
         : 0.75
@@ -1277,7 +1444,7 @@ serve [--stdio]
 
       if (semantic) {
         try {
-          await addSemanticEdges(data, raw.pages, modelOverride, simThreshold, simTopK)
+          await addSemanticEdges(data, raw.pages, modelOverride, simThreshold, simTopK, granularity)
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err)
           if (
@@ -1325,7 +1492,7 @@ serve [--stdio]
           result = renderGraphMermaid(data)
           break
         case "html":
-          result = renderGraphHtml(data, docsDir, semantic && data.semanticEdges.length > 0)
+          result = renderGraphHtml(data, docsDir, semantic && data.semanticEdges.length > 0, granularity)
           break
         default:
           die(`Unknown format: ${format}. Use json, dot, mermaid, or html.`)
@@ -1346,6 +1513,7 @@ serve [--stdio]
         options: {
           limit: { type: "string" },
           model: { type: "string" },
+          granularity: { type: "string" },
         },
         allowPositionals: true,
       })
@@ -1353,49 +1521,127 @@ serve [--stdio]
       const query = positionals[1] ?? die("semantic-search requires <query>")
       const limit = values.limit !== undefined ? parseInt(values.limit, 10) : 10
       const modelOverride = values.model
+      const granularity = (values.granularity ?? "page") as import("./ai/granular.js").GranularityLevel
 
       // Check API key before doing any work
       const { assertApiKey } = await import("./ai/config.js")
       assertApiKey()
 
       const { embedTexts, embedOne } = await import("./ai/embeddings.js")
+      const { unitize } = await import("./ai/granular.js")
 
       const graph = buildGraph(docsDir)
-      const pages = graph.pages
+      const units = unitize(graph.pages, granularity)
 
-      // Build embedding texts (title + first 2000 chars of content per page)
-      const pageTexts = pages.map((p) => {
-        const titlePart = p.title ? p.title + "\n\n" : ""
-        return titlePart + p.content.slice(0, 2000)
-      })
+      process.stderr.write(
+        `[markdown-lsp] semantic-search: ${units.length} units at granularity="${granularity}"\n`
+      )
 
-      // Embed all pages (cached) and the query
-      const [pageEmbeddings, queryVec] = await Promise.all([
-        embedTexts(pageTexts, modelOverride, true),
+      const unitTexts = units.map((u) => u.text)
+
+      // Embed all units (cached) and the query in parallel
+      const [unitEmbeddings, queryVec] = await Promise.all([
+        embedTexts(unitTexts, modelOverride, true),
         embedOne(query, modelOverride),
       ])
 
-      // Score each page
-      const scored = pages.map((p, i) => {
-        const vec = pageEmbeddings.vectors[i]
-        if (!vec) return { page: p, score: 0 }
-        return { page: p, score: cosineSim(queryVec, vec) }
+      if (unitEmbeddings.tokensUsed > 0) {
+        process.stderr.write(`[markdown-lsp] Embeddings computed (${unitEmbeddings.tokensUsed} tokens).\n`)
+      } else {
+        process.stderr.write(`[markdown-lsp] All embeddings from cache (0 API tokens for docs).\n`)
+      }
+
+      // Score each unit
+      const scored = units.map((u, i) => {
+        const vec = unitEmbeddings.vectors[i]
+        if (!vec) return { unit: u, score: 0 }
+        return { unit: u, score: cosineSim(queryVec, vec) }
       })
 
       scored.sort((a, b) => b.score - a.score)
       const topN = scored.slice(0, limit)
 
-      const results = topN.map(({ page, score }) => {
-        const snippet = page.content.slice(0, 200).replace(/\s+/g, " ").trim()
-        return {
-          pagePath: page.path,
-          pageTitle: page.title ?? page.path,
+      const results = topN.map(({ unit, score }) => {
+        const snippet = unit.text.slice(0, 200).replace(/\s+/g, " ").trim()
+        const snippetOut = snippet.length < unit.text.length ? snippet + "…" : snippet
+
+        const base = {
+          level: unit.level,
+          pagePath: unit.pagePath,
+          pageTitle: unit.pageTitle ?? unit.pagePath,
           score: Math.round(score * 10000) / 10000,
-          snippet: snippet.length < page.content.length ? snippet + "…" : snippet,
+          snippet: snippetOut,
         }
+
+        if (unit.level === "heading") {
+          return { ...base, anchor: unit.anchor ?? null, headingPath: unit.headingPath ?? [] }
+        }
+        if (unit.level === "line") {
+          return { ...base, line: unit.line ?? 0 }
+        }
+        return base
       })
 
       out(results, pretty)
+      break
+    }
+
+    case "index": {
+      const { values, positionals } = parseArgs({
+        args: filteredRest,
+        options: {
+          granularity: { type: "string" },
+          model: { type: "string" },
+        },
+        allowPositionals: true,
+      })
+      const docsDir = positionals[0] ?? die("index requires <docs-dir>")
+      const granularity = (values.granularity ?? "page") as import("./ai/granular.js").GranularityLevel
+      const modelOverride = values.model
+
+      // Check API key
+      const { assertApiKey } = await import("./ai/config.js")
+      assertApiKey()
+
+      const { embedTexts } = await import("./ai/embeddings.js")
+      const { unitize } = await import("./ai/granular.js")
+
+      const graph = buildGraph(docsDir)
+      const units = unitize(graph.pages, granularity)
+
+      process.stderr.write(
+        `[markdown-lsp] index: ${units.length} units at granularity="${granularity}"` +
+        ` (model: ${modelOverride ?? "openai/text-embedding-3-small"})\n`
+      )
+
+      const unitTexts = units.map((u) => u.text)
+      const startTime = Date.now()
+      const { vectors, tokensUsed } = await embedTexts(unitTexts, modelOverride, true)
+      const elapsed = Date.now() - startTime
+
+      const indexed = vectors.filter((v) => v !== null).length
+
+      if (tokensUsed > 0) {
+        process.stderr.write(
+          `[markdown-lsp] index: ${indexed}/${units.length} units embedded,` +
+          ` ${tokensUsed} new tokens used, ${elapsed}ms\n`
+        )
+      } else {
+        process.stderr.write(
+          `[markdown-lsp] index: all ${indexed} units from cache — 0 API tokens (already indexed)\n`
+        )
+      }
+
+      out({
+        docsDir,
+        granularity,
+        totalUnits: units.length,
+        newlyEmbedded: Math.round(tokensUsed > 0 ? indexed : 0),
+        fromCache: tokensUsed === 0 ? indexed : units.length - indexed,
+        tokensUsed,
+        elapsedMs: elapsed,
+        model: modelOverride ?? "openai/text-embedding-3-small",
+      }, pretty)
       break
     }
 
