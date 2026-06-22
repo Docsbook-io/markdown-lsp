@@ -8,7 +8,7 @@
 
 CLI and library for querying Markdown documentation graphs. Point it at a folder of `.md` files and get instant full-text search, outline, link analysis, and symbol lookup — all as JSON.
 
-**Status: v1.0.0. CLI is the default interface. LSP stdio mode available as a subcommand.**
+**Status: v1.1.0. CLI is the default interface. LSP stdio mode available as a subcommand.**
 
 ---
 
@@ -55,6 +55,8 @@ All subcommands accept a **`--pretty`** flag for indented JSON output (compact b
 | `resolve-link` | `<docs-dir> <from-page> <link-text>` | Resolve a specific link text from a page |
 | `get-section` | `<docs-dir> <page> <anchor>` | Get a section by anchor slug |
 | `lsp` / `serve` | `[--stdio]` | Start the LSP stdio server |
+| `graph` | `<docs-dir> [--format json\|dot\|mermaid\|html] [--out file]` | Export the doc link graph |
+| `semantic-search` | `<docs-dir> <query> [--limit n] [--model model]` | AI semantic search via embeddings |
 
 ### search-text modes
 
@@ -98,6 +100,63 @@ markdown-lsp resolve-link ./docs README.md "Getting Started"
 # Get a specific section by anchor
 markdown-lsp get-section ./docs overview.md quick-links --pretty
 ```
+
+---
+
+## Graph export
+
+Export the full page link graph — nodes are pages, edges are markdown links.
+
+```bash
+# JSON (nodes + edges — machine-readable)
+markdown-lsp graph ./docs --format json --pretty
+
+# Graphviz DOT
+markdown-lsp graph ./docs --format dot > graph.dot
+
+# Mermaid flowchart (embed in markdown)
+markdown-lsp graph ./docs --format mermaid
+
+# Self-contained interactive HTML with D3 force-directed graph
+# (drag, zoom, hover highlights neighbours, click to inspect)
+markdown-lsp graph ./docs --format html --out graph.html
+```
+
+JSON output shape:
+```json
+{
+  "nodes": [{"id": "README.md", "title": "Docsbook", "charCount": 2634, "sectionsCount": 10}],
+  "edges": [{"source": "README.md", "target": "quick-start.md", "kind": "inline", "label": "Get started"}],
+  "unresolvedCount": 3
+}
+```
+
+---
+
+## Semantic search
+
+AI-powered semantic search using text embeddings — finds conceptually related pages even if they
+don't contain the exact query words.
+
+```bash
+# Requires OPENROUTER_API_KEY (OpenRouter) or AI_GATEWAY_API_KEY (Vercel AI Gateway)
+OPENROUTER_API_KEY=sk-or-... markdown-lsp semantic-search ./docs "how to configure webhooks" --limit 5
+
+# Override embedding model
+markdown-lsp semantic-search ./docs "authentication" --model openai/text-embedding-3-small --limit 3
+```
+
+- Default embedding model: `openai/text-embedding-3-small` (via OpenRouter — model prefix required)
+- Results cached in `.markdown-lsp-cache/embeddings/` — second run is instant, no API call
+- Returns `[{ pagePath, pageTitle, score, snippet }]` sorted by cosine similarity
+
+**Environment variables:**
+
+| Variable | Purpose |
+|---|---|
+| `OPENROUTER_API_KEY` | OpenRouter API key (takes priority if set) |
+| `AI_GATEWAY_API_KEY` | Vercel AI Gateway key (fallback) |
+| `EMBEDDING_MODEL` | Override default embedding model |
 
 ---
 
