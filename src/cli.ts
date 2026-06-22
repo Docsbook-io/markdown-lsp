@@ -10,7 +10,7 @@ import {
 } from "./bridge/index.js"
 
 const USAGE = `
-markdown-lsp v1.1.0 — CLI for querying Markdown documentation graphs
+markdown-lsp v1.2.0 — CLI for querying Markdown documentation graphs
 
 USAGE
   markdown-lsp <subcommand> [options]
@@ -46,9 +46,19 @@ SUBCOMMANDS
       Retrieve a section by its anchor slug.
 
   graph <docs-dir> [--format json|dot|mermaid|html] [--out <file>]
+        [--semantic] [--sim-threshold <0-1>] [--sim-top-k <n>]
+        [--model <embedding-model>]
       Export the doc link graph. Default format: json (nodes/edges).
       Use --format html for a self-contained interactive D3 visualisation.
       Use --out <file> to write to disk instead of stdout.
+      Add --semantic to overlay AI-powered similarity edges (requires
+      OPENROUTER_API_KEY or AI_GATEWAY_API_KEY). Both link edges and
+      semantic edges are shown in the HTML graph with checkboxes to
+      toggle each type. Clicking a node opens a side-panel with full
+      info and highlights all its connections.
+        --sim-threshold  Minimum cosine similarity for a semantic edge (default: 0.75)
+        --sim-top-k      Maximum semantic neighbours per node (default: 5)
+        --model          Embedding model override (default: openai/text-embedding-3-small)
 
   semantic-search <docs-dir> <query> [--limit <n>] [--model <embedding-model>]
       AI-powered semantic search using embeddings. Requires OPENROUTER_API_KEY
@@ -72,12 +82,45 @@ OUTPUT
   over stdio — it does NOT print JSON.
 
 EXAMPLES
+  # Overview of all pages
   markdown-lsp workspace-outline ./docs
-  markdown-lsp search-text ./docs "getting started" --pretty
+
+  # Heading outline of one page
   markdown-lsp outline ./docs introduction.md
+
+  # Full-text search (natural-language, ranked)
+  markdown-lsp search-text ./docs "getting started"
+  markdown-lsp search-text ./docs "webhook signing" --mode verbatim --limit 5
+
+  # Fuzzy heading search
+  markdown-lsp search-symbols ./docs "webhook" --limit 10
+
+  # Find pages by filename glob
+  markdown-lsp search-paths ./docs "ai/*.md"
+
+  # Link graph
   markdown-lsp graph ./docs --format json --pretty
   markdown-lsp graph ./docs --format html --out graph.html
+  markdown-lsp graph ./docs --format dot | dot -Tsvg > graph.svg
+  markdown-lsp graph ./docs --format mermaid
+
+  # Build embeddings + interactive semantic graph in one command
+  markdown-lsp graph ./docs --format html --semantic --out graph.html
+  markdown-lsp graph ./docs --format html --semantic --sim-threshold 0.75 --sim-top-k 5 --out graph.html
+
+  # Backlinks / outgoing links
+  markdown-lsp links-to ./docs quick-start.md
+  markdown-lsp links-from ./docs README.md
+
+  # Resolve / read
+  markdown-lsp resolve-link ./docs README.md "Getting Started"
+  markdown-lsp get-section ./docs overview.md "quick-links"
+
+  # Semantic search (AI)
   markdown-lsp semantic-search ./docs "how to set up webhooks" --limit 5
+  markdown-lsp semantic-search ./docs "authentication" --model openai/text-embedding-3-small
+
+  # LSP server
   markdown-lsp lsp --stdio
 `.trim()
 
@@ -90,10 +133,6 @@ function out(value: unknown, pretty: boolean): void {
   process.stdout.write((pretty ? JSON.stringify(value, null, 2) : JSON.stringify(value)) + "\n")
 }
 
-async function startLsp(): Promise<void> {
-  await import("./lsp.js")
-}
-
 // ── Graph export helpers ──────────────────────────────────────────────────────
 
 interface GraphNode {
@@ -101,6 +140,11 @@ interface GraphNode {
   title: string
   charCount: number
   sectionsCount: number
+  // Side-panel data
+  sections: Array<{ anchor: string | null; headingPath: string[]; level: number }>
+  outgoing: Array<{ target: string; label: string | null; kind: string }>
+  incoming: Array<{ source: string; label: string | null; kind: string }>
+  topSimilar: Array<{ path: string; title: string | null; score: number }>
 }
 
 interface GraphEdge {
@@ -110,224 +154,67 @@ interface GraphEdge {
   label?: string
 }
 
+interface SemanticEdge {
+  source: string
+  target: string
+  score: number
+  kind: "semantic"
+}
+
 interface GraphExport {
   nodes: GraphNode[]
   edges: GraphEdge[]
+  semanticEdges: SemanticEdge[]
   unresolvedCount: number
 }
 
 function buildGraphExport(raw: ReturnType<ReturnType<typeof buildGraph>["toJSON"]>): GraphExport {
-  const nodes: GraphNode[] = raw.pages.map((p) => ({
-    id: p.path,
-    title: p.title ?? p.path,
-    charCount: p.content.length,
-    sectionsCount: p.sections.length,
-  }))
-  const edges: GraphEdge[] = raw.links
-    .filter((l) => l.toResolvedPath !== null)
-    .map((l) => ({
+  // Build node map with full side-panel data
+  const nodeMap = new Map<string, GraphNode>()
+  for (const p of raw.pages) {
+    nodeMap.set(p.path, {
+      id: p.path,
+      title: p.title ?? p.path,
+      charCount: p.content.length,
+      sectionsCount: p.sections.length,
+      sections: p.sections.map((s) => ({
+        anchor: s.anchor,
+        headingPath: s.headingPath,
+        level: s.level,
+      })),
+      outgoing: [],
+      incoming: [],
+      topSimilar: [],
+    })
+  }
+
+  const edges: GraphEdge[] = []
+  for (const l of raw.links) {
+    if (l.toResolvedPath === null) continue
+    edges.push({
       source: l.fromPath,
-      target: l.toResolvedPath!,
+      target: l.toResolvedPath,
       kind: l.kind,
       ...(l.textAtLink ? { label: l.textAtLink } : {}),
-    }))
-  return { nodes, edges, unresolvedCount: raw.unresolved.length }
-}
-
-function renderGraphJson(data: GraphExport, pretty: boolean): string {
-  return pretty ? JSON.stringify(data, null, 2) : JSON.stringify(data)
-}
-
-function renderGraphDot(data: GraphExport): string {
-  const lines: string[] = ['digraph G {', '  rankdir=LR;']
-  // Declare nodes with labels
-  for (const n of data.nodes) {
-    const label = n.title.replace(/"/g, '\\"')
-    const id = n.id.replace(/"/g, '\\"')
-    lines.push(`  "${id}" [label="${label}"];`)
+    })
+    nodeMap.get(l.fromPath)?.outgoing.push({
+      target: l.toResolvedPath,
+      label: l.textAtLink,
+      kind: l.kind,
+    })
+    nodeMap.get(l.toResolvedPath)?.incoming.push({
+      source: l.fromPath,
+      label: l.textAtLink,
+      kind: l.kind,
+    })
   }
-  // Edges
-  for (const e of data.edges) {
-    const src = e.source.replace(/"/g, '\\"')
-    const tgt = e.target.replace(/"/g, '\\"')
-    lines.push(`  "${src}" -> "${tgt}";`)
+
+  return {
+    nodes: Array.from(nodeMap.values()),
+    edges,
+    semanticEdges: [],
+    unresolvedCount: raw.unresolved.length,
   }
-  lines.push('}')
-  return lines.join('\n')
-}
-
-function renderGraphMermaid(data: GraphExport): string {
-  const lines: string[] = ['graph TD']
-  for (const e of data.edges) {
-    const src = e.source.replace(/"/g, '\\"')
-    const tgt = e.target.replace(/"/g, '\\"')
-    lines.push(`  "${src}" --> "${tgt}"`)
-  }
-  return lines.join('\n')
-}
-
-function renderGraphHtml(data: GraphExport, docsDir: string): string {
-  const title = docsDir.split('/').filter(Boolean).pop() ?? docsDir
-  const jsonData = JSON.stringify(data)
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<title>Doc Graph — ${title}</title>
-<script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
-<style>
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: system-ui, sans-serif; background: #0f1117; color: #e2e8f0; overflow: hidden; }
-  #toolbar { position: fixed; top: 0; left: 0; right: 0; height: 44px; background: #1a1d27;
-             border-bottom: 1px solid #2d3148; display: flex; align-items: center; padding: 0 16px;
-             z-index: 10; gap: 12px; font-size: 13px; }
-  #toolbar h1 { font-size: 14px; font-weight: 600; color: #a5b4fc; }
-  #toolbar span { color: #64748b; }
-  #graph { position: fixed; top: 44px; left: 0; right: 0; bottom: 0; }
-  #tooltip { position: fixed; pointer-events: none; background: #1e2130; border: 1px solid #3b4168;
-             border-radius: 6px; padding: 8px 12px; font-size: 12px; line-height: 1.5;
-             max-width: 280px; z-index: 20; display: none; }
-  #tooltip .title { font-weight: 600; color: #c7d2fe; margin-bottom: 2px; }
-  #tooltip .path { color: #64748b; font-size: 11px; }
-  #tooltip .stats { color: #94a3b8; font-size: 11px; margin-top: 4px; }
-  .node circle { cursor: pointer; transition: r 0.15s; }
-  .node text { pointer-events: none; font-size: 10px; fill: #cbd5e1; }
-  .link { stroke: #3b4168; stroke-opacity: 0.6; fill: none; }
-  .link.highlighted { stroke: #a5b4fc; stroke-opacity: 1; }
-  .node.dimmed circle { opacity: 0.25; }
-  .node.dimmed text { opacity: 0.15; }
-  .node.highlighted circle { stroke: #a5b4fc !important; stroke-width: 2px !important; }
-</style>
-</head>
-<body>
-<div id="toolbar">
-  <h1>Doc Graph — ${title}</h1>
-  <span id="stats"></span>
-</div>
-<div id="tooltip"></div>
-<svg id="graph"></svg>
-<script>
-const DATA = ${jsonData};
-
-const width = window.innerWidth;
-const height = window.innerHeight - 44;
-const svg = d3.select('#graph')
-  .attr('width', width)
-  .attr('height', height);
-
-// Build adjacency for highlight
-const adjacency = new Map();
-for (const n of DATA.nodes) adjacency.set(n.id, new Set());
-for (const e of DATA.edges) {
-  if (adjacency.has(e.source)) adjacency.get(e.source).add(e.target);
-  if (adjacency.has(e.target)) adjacency.get(e.target).add(e.source);
-}
-
-document.getElementById('stats').textContent =
-  DATA.nodes.length + ' pages · ' + DATA.edges.length + ' links · ' +
-  DATA.unresolvedCount + ' unresolved';
-
-const g = svg.append('g');
-
-// Zoom
-svg.call(d3.zoom()
-  .scaleExtent([0.05, 4])
-  .on('zoom', (event) => g.attr('transform', event.transform)));
-
-// Links
-const linkSel = g.append('g').selectAll('line')
-  .data(DATA.edges)
-  .join('line')
-  .attr('class', 'link')
-  .attr('marker-end', 'url(#arrow)');
-
-// Arrow marker
-svg.append('defs').append('marker')
-  .attr('id', 'arrow')
-  .attr('viewBox', '0 -4 8 8')
-  .attr('refX', 14)
-  .attr('refY', 0)
-  .attr('markerWidth', 6)
-  .attr('markerHeight', 6)
-  .attr('orient', 'auto')
-  .append('path')
-  .attr('d', 'M0,-4L8,0L0,4')
-  .attr('fill', '#3b4168');
-
-// Color scale by first path segment
-const color = d3.scaleOrdinal(d3.schemeTableau10);
-const segColor = (id) => color(id.split('/')[0] ?? '');
-
-// Nodes
-const nodeSel = g.append('g').selectAll('g')
-  .data(DATA.nodes)
-  .join('g')
-  .attr('class', 'node')
-  .call(d3.drag()
-    .on('start', (event, d) => { if (!event.active) sim.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; })
-    .on('drag', (event, d) => { d.fx = event.x; d.fy = event.y; })
-    .on('end', (event, d) => { if (!event.active) sim.alphaTarget(0); d.fx = null; d.fy = null; }));
-
-nodeSel.append('circle')
-  .attr('r', d => Math.max(5, Math.min(14, Math.sqrt(d.charCount / 120))))
-  .attr('fill', d => segColor(d.id))
-  .attr('fill-opacity', 0.85)
-  .attr('stroke', d => segColor(d.id))
-  .attr('stroke-width', 1);
-
-nodeSel.append('text')
-  .attr('dx', d => Math.max(5, Math.min(14, Math.sqrt(d.charCount / 120))) + 3)
-  .attr('dy', '0.35em')
-  .text(d => d.title.length > 24 ? d.title.slice(0, 22) + '…' : d.title);
-
-// Tooltip
-const tooltip = document.getElementById('tooltip');
-nodeSel
-  .on('mouseover', (event, d) => {
-    tooltip.style.display = 'block';
-    tooltip.innerHTML = '<div class="title">' + d.title + '</div>' +
-      '<div class="path">' + d.id + '</div>' +
-      '<div class="stats">' + d.charCount.toLocaleString() + ' chars · ' + d.sectionsCount + ' sections</div>';
-    highlightNode(d);
-  })
-  .on('mousemove', (event) => {
-    tooltip.style.left = (event.clientX + 14) + 'px';
-    tooltip.style.top = (event.clientY + 14) + 'px';
-  })
-  .on('mouseout', () => {
-    tooltip.style.display = 'none';
-    clearHighlight();
-  });
-
-function highlightNode(d) {
-  const neighbors = adjacency.get(d.id) ?? new Set();
-  nodeSel.classed('dimmed', n => n.id !== d.id && !neighbors.has(n.id));
-  nodeSel.classed('highlighted', n => n.id === d.id);
-  linkSel.classed('highlighted', e => e.source.id === d.id || e.target.id === d.id);
-}
-
-function clearHighlight() {
-  nodeSel.classed('dimmed', false).classed('highlighted', false);
-  linkSel.classed('highlighted', false);
-}
-
-// Force simulation
-const sim = d3.forceSimulation(DATA.nodes)
-  .force('link', d3.forceLink(DATA.edges).id(d => d.id).distance(80).strength(0.5))
-  .force('charge', d3.forceManyBody().strength(-180))
-  .force('center', d3.forceCenter(width / 2, height / 2))
-  .force('collide', d3.forceCollide(18))
-  .on('tick', () => {
-    linkSel
-      .attr('x1', d => d.source.x)
-      .attr('y1', d => d.source.y)
-      .attr('x2', d => d.target.x)
-      .attr('y2', d => d.target.y);
-    nodeSel.attr('transform', d => 'translate(' + d.x + ',' + d.y + ')');
-  });
-</script>
-</body>
-</html>`
 }
 
 // ── Cosine similarity (no deps) ───────────────────────────────────────────────
@@ -341,6 +228,567 @@ function cosineSim(a: number[], b: number[]): number {
   }
   if (na === 0 || nb === 0) return 0
   return dot / (Math.sqrt(na) * Math.sqrt(nb))
+}
+
+// ── Semantic edge computation ─────────────────────────────────────────────────
+
+async function addSemanticEdges(
+  data: GraphExport,
+  pages: ReturnType<ReturnType<typeof buildGraph>["toJSON"]>["pages"],
+  modelOverride: string | undefined,
+  simThreshold: number,
+  simTopK: number,
+): Promise<void> {
+  const { assertApiKey } = await import("./ai/config.js")
+  assertApiKey()
+
+  const { embedTexts } = await import("./ai/embeddings.js")
+
+  const pageTexts = pages.map((p) => {
+    const titlePart = p.title ? p.title + "\n\n" : ""
+    return titlePart + p.content.slice(0, 2000)
+  })
+
+  process.stderr.write(
+    `[markdown-lsp] Embedding ${pages.length} pages` +
+    ` (model: ${modelOverride ?? "openai/text-embedding-3-small"})...\n`
+  )
+  const { vectors, tokensUsed } = await embedTexts(pageTexts, modelOverride, true)
+  if (tokensUsed > 0) {
+    process.stderr.write(`[markdown-lsp] Embeddings computed (${tokensUsed} tokens used).\n`)
+  } else {
+    process.stderr.write(`[markdown-lsp] Embeddings loaded from cache (0 API tokens).\n`)
+  }
+
+  const semanticEdges: SemanticEdge[] = []
+
+  for (let i = 0; i < pages.length; i++) {
+    const vecI = vectors[i]
+    if (!vecI) continue
+
+    // Compute similarity to all other pages
+    const sims: Array<{ j: number; score: number }> = []
+    for (let j = 0; j < pages.length; j++) {
+      if (j === i) continue
+      const vecJ = vectors[j]
+      if (!vecJ) continue
+      const score = cosineSim(vecI, vecJ)
+      if (score >= simThreshold) {
+        sims.push({ j, score })
+      }
+    }
+
+    // topSimilar for side panel (no i<j constraint, full ranking)
+    const topSimilar = [...sims]
+      .sort((a, b) => b.score - a.score)
+      .slice(0, simTopK)
+      .map(({ j, score }) => ({
+        path: pages[j]!.path,
+        title: pages[j]!.title,
+        score: Math.round(score * 10000) / 10000,
+      }))
+
+    const node = data.nodes.find((n) => n.id === pages[i]!.path)
+    if (node) node.topSimilar = topSimilar
+
+    // Semantic edges: de-dup using i<j to avoid duplicates
+    for (const { j, score } of sims) {
+      if (j > i) {
+        semanticEdges.push({
+          source: pages[i]!.path,
+          target: pages[j]!.path,
+          score: Math.round(score * 10000) / 10000,
+          kind: "semantic",
+        })
+      }
+    }
+  }
+
+  data.semanticEdges = semanticEdges
+  process.stderr.write(
+    `[markdown-lsp] ${semanticEdges.length} semantic edges` +
+    ` (threshold=${simThreshold}, topK=${simTopK}).\n`
+  )
+}
+
+// ── Graph renderers ───────────────────────────────────────────────────────────
+
+function renderGraphJson(data: GraphExport, pretty: boolean): string {
+  return pretty ? JSON.stringify(data, null, 2) : JSON.stringify(data)
+}
+
+function renderGraphDot(data: GraphExport): string {
+  const lines: string[] = ['digraph G {', '  rankdir=LR;']
+  for (const n of data.nodes) {
+    const label = n.title.replace(/"/g, '\\"')
+    const id = n.id.replace(/"/g, '\\"')
+    lines.push(`  "${id}" [label="${label}"];`)
+  }
+  for (const e of data.edges) {
+    const src = e.source.replace(/"/g, '\\"')
+    const tgt = e.target.replace(/"/g, '\\"')
+    lines.push(`  "${src}" -> "${tgt}";`)
+  }
+  for (const e of data.semanticEdges) {
+    const src = e.source.replace(/"/g, '\\"')
+    const tgt = e.target.replace(/"/g, '\\"')
+    lines.push(`  "${src}" -> "${tgt}" [style=dashed color="#f59e0b" label="${e.score}"];`)
+  }
+  lines.push('}')
+  return lines.join('\n')
+}
+
+function renderGraphMermaid(data: GraphExport): string {
+  const lines: string[] = ['graph TD']
+  for (const e of data.edges) {
+    const src = e.source.replace(/"/g, '\\"')
+    const tgt = e.target.replace(/"/g, '\\"')
+    lines.push(`  "${src}" --> "${tgt}"`)
+  }
+  for (const e of data.semanticEdges) {
+    const src = e.source.replace(/"/g, '\\"')
+    const tgt = e.target.replace(/"/g, '\\"')
+    lines.push(`  "${src}" -. ${e.score} .-> "${tgt}"`)
+  }
+  return lines.join('\n')
+}
+
+function renderGraphHtml(data: GraphExport, docsDir: string, hasSemantic: boolean): string {
+  const title = docsDir.split('/').filter(Boolean).pop() ?? docsDir
+  const jsonData = JSON.stringify(data)
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Doc Graph — ${title}</title>
+<script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, sans-serif; background: #0f1117; color: #e2e8f0; overflow: hidden; }
+  #toolbar { position: fixed; top: 0; left: 0; right: 0; height: 44px; background: #1a1d27;
+             border-bottom: 1px solid #2d3148; display: flex; align-items: center; padding: 0 16px;
+             z-index: 10; gap: 16px; font-size: 13px; }
+  #toolbar h1 { font-size: 14px; font-weight: 600; color: #a5b4fc; }
+  #toolbar span { color: #64748b; }
+  .toggle-label { display: flex; align-items: center; gap: 6px; cursor: pointer; user-select: none; font-size: 12px; }
+  .toggle-label input[type=checkbox] { accent-color: #a5b4fc; width: 14px; height: 14px; cursor: pointer; }
+  .toggle-links { color: #a5b4fc; }
+  .toggle-semantic { color: #f59e0b; }
+  .toggle-label.disabled { opacity: 0.4; cursor: not-allowed; pointer-events: none; }
+  #graph-wrap { position: fixed; top: 44px; left: 0; bottom: 0; right: 0; transition: right 0.25s; }
+  #graph-wrap.panel-open { right: 320px; }
+  svg#graph { width: 100%; height: 100%; display: block; }
+  #tooltip { position: fixed; pointer-events: none; background: #1e2130; border: 1px solid #3b4168;
+             border-radius: 6px; padding: 8px 12px; font-size: 12px; line-height: 1.5;
+             max-width: 280px; z-index: 20; display: none; }
+  #tooltip .title { font-weight: 600; color: #c7d2fe; margin-bottom: 2px; }
+  #tooltip .path { color: #64748b; font-size: 11px; }
+  #tooltip .stats { color: #94a3b8; font-size: 11px; margin-top: 4px; }
+  #panel { position: fixed; top: 44px; right: 0; width: 320px; bottom: 0;
+           background: #1a1d27; border-left: 1px solid #2d3148; z-index: 15;
+           overflow-y: auto; display: none; }
+  #panel.open { display: block; }
+  #panel-header { padding: 14px 16px 10px; border-bottom: 1px solid #2d3148;
+                  display: flex; align-items: flex-start; gap: 8px; }
+  #panel-close { background: none; border: none; color: #64748b; cursor: pointer;
+                 font-size: 18px; line-height: 1; padding: 2px; flex-shrink: 0; margin-left: auto; }
+  #panel-close:hover { color: #e2e8f0; }
+  #panel-title { font-weight: 700; font-size: 14px; color: #c7d2fe; margin-bottom: 2px; word-break: break-all; }
+  #panel-path { font-size: 11px; color: #64748b; word-break: break-all; }
+  #panel-stats { font-size: 11px; color: #94a3b8; margin-top: 4px; }
+  #panel-body { padding: 12px 16px; }
+  .panel-section { margin-bottom: 16px; }
+  .panel-section h3 { font-size: 11px; font-weight: 600; color: #64748b; text-transform: uppercase;
+                      letter-spacing: 0.05em; margin-bottom: 8px; }
+  .panel-section ul { list-style: none; }
+  .panel-section ul li { font-size: 12px; color: #94a3b8; padding: 3px 0; border-bottom: 1px solid #1e2130; }
+  .panel-section ul li:last-child { border-bottom: none; }
+  .panel-section ul li a { color: #a5b4fc; text-decoration: none; cursor: pointer; }
+  .panel-section ul li a:hover { text-decoration: underline; }
+  .panel-section ul li .score { font-size: 11px; color: #64748b; margin-left: 6px; }
+  .panel-section ul li .kind { font-size: 10px; color: #475569; margin-left: 4px; background: #1e2130;
+                                padding: 1px 4px; border-radius: 3px; }
+  .panel-section .empty { color: #475569; font-size: 12px; font-style: italic; }
+  .node circle { cursor: pointer; transition: r 0.15s; }
+  .node text { pointer-events: none; font-size: 10px; fill: #cbd5e1; }
+  .link { stroke: #3b4168; stroke-opacity: 0.6; fill: none; }
+  .link.highlighted { stroke: #a5b4fc; stroke-opacity: 1; stroke-width: 1.5; }
+  .link-semantic { stroke: #f59e0b; stroke-opacity: 0.35; stroke-dasharray: 5,3; fill: none; }
+  .link-semantic.highlighted { stroke-opacity: 0.9; stroke-dasharray: none; }
+  .node.dimmed circle { opacity: 0.12; }
+  .node.dimmed text { opacity: 0.06; }
+  .node.highlighted circle { stroke: #a5b4fc !important; stroke-width: 2px !important; }
+  .node.selected circle { stroke: #f59e0b !important; stroke-width: 2.5px !important; }
+</style>
+</head>
+<body>
+<div id="toolbar">
+  <h1>Doc Graph — ${title}</h1>
+  <span id="stats"></span>
+  <label class="toggle-label toggle-links" title="Toggle link edges (solid lines)">
+    <input type="checkbox" id="chk-links" checked> Links
+  </label>
+  <label class="toggle-label toggle-semantic${hasSemantic ? '' : ' disabled'}"
+         title="${hasSemantic ? 'Toggle semantic similarity edges (dashed lines)' : 'Run graph --semantic to enable'}">
+    <input type="checkbox" id="chk-semantic"${hasSemantic ? ' checked' : ' disabled'}> Semantic
+  </label>
+</div>
+<div id="graph-wrap">
+  <svg id="graph"></svg>
+</div>
+<div id="panel">
+  <div id="panel-header">
+    <div>
+      <div id="panel-title"></div>
+      <div id="panel-path"></div>
+      <div id="panel-stats"></div>
+    </div>
+    <button id="panel-close" title="Close panel">&#x2715;</button>
+  </div>
+  <div id="panel-body"></div>
+</div>
+<div id="tooltip"></div>
+<script>
+const DATA = ${jsonData};
+const HAS_SEMANTIC = ${hasSemantic};
+
+// Node map for fast lookup
+const nodeById = new Map(DATA.nodes.map(n => [n.id, n]));
+
+// Build adjacency maps for highlight
+const adjLink = new Map();
+const adjSemantic = new Map();
+for (const n of DATA.nodes) { adjLink.set(n.id, new Set()); adjSemantic.set(n.id, new Set()); }
+for (const e of DATA.edges) {
+  if (adjLink.has(e.source)) adjLink.get(e.source).add(e.target);
+  if (adjLink.has(e.target)) adjLink.get(e.target).add(e.source);
+}
+for (const e of DATA.semanticEdges) {
+  if (adjSemantic.has(e.source)) adjSemantic.get(e.source).add(e.target);
+  if (adjSemantic.has(e.target)) adjSemantic.get(e.target).add(e.source);
+}
+
+const linkCount = DATA.edges.length;
+const semCount = DATA.semanticEdges.length;
+document.getElementById('stats').textContent =
+  DATA.nodes.length + ' pages · ' + linkCount + ' links' +
+  (semCount > 0 ? ' · ' + semCount + ' semantic' : '') +
+  ' · ' + DATA.unresolvedCount + ' unresolved';
+
+const graphWrap = document.getElementById('graph-wrap');
+function wrapW() { return graphWrap.offsetWidth || window.innerWidth; }
+function wrapH() { return graphWrap.offsetHeight || (window.innerHeight - 44); }
+
+const svg = d3.select('svg#graph');
+
+const g = svg.append('g');
+
+// Zoom + click-on-background
+svg.call(d3.zoom()
+  .scaleExtent([0.05, 4])
+  .on('zoom', (event) => g.attr('transform', event.transform)));
+
+svg.on('click', (event) => {
+  if (event.target.tagName === 'svg' || event.target.tagName === 'rect') {
+    clearHighlight();
+    closePanel();
+  }
+});
+
+// Arrow markers
+const defs = svg.append('defs');
+defs.append('marker').attr('id','arrow')
+  .attr('viewBox','0 -4 8 8').attr('refX',14).attr('refY',0)
+  .attr('markerWidth',6).attr('markerHeight',6).attr('orient','auto')
+  .append('path').attr('d','M0,-4L8,0L0,4').attr('fill','#3b4168');
+defs.append('marker').attr('id','arrow-sem')
+  .attr('viewBox','0 -4 8 8').attr('refX',14).attr('refY',0)
+  .attr('markerWidth',6).attr('markerHeight',6).attr('orient','auto')
+  .append('path').attr('d','M0,-4L8,0L0,4').attr('fill','#f59e0b');
+
+// Semantic edges (behind links)
+const semanticLinkSel = g.append('g').selectAll('line')
+  .data(DATA.semanticEdges)
+  .join('line')
+  .attr('class','link-semantic')
+  .attr('stroke-width', d => Math.max(0.8, d.score * 2.5))
+  .attr('marker-end','url(#arrow-sem)');
+
+// Link edges
+const linkSel = g.append('g').selectAll('line')
+  .data(DATA.edges)
+  .join('line')
+  .attr('class','link')
+  .attr('marker-end','url(#arrow)');
+
+// Color by first path segment
+const color = d3.scaleOrdinal(d3.schemeTableau10);
+const segColor = id => color(id.split('/')[0] ?? '');
+
+let selectedNodeId = null;
+
+// Nodes
+const nodeSel = g.append('g').selectAll('g')
+  .data(DATA.nodes)
+  .join('g')
+  .attr('class','node')
+  .call(d3.drag()
+    .on('start',(ev,d)=>{ if(!ev.active) sim.alphaTarget(0.3).restart(); d.fx=d.x; d.fy=d.y; })
+    .on('drag',(ev,d)=>{ d.fx=ev.x; d.fy=ev.y; })
+    .on('end',(ev,d)=>{ if(!ev.active) sim.alphaTarget(0); d.fx=null; d.fy=null; }));
+
+nodeSel.append('circle')
+  .attr('r', d => Math.max(5, Math.min(14, Math.sqrt(d.charCount/120))))
+  .attr('fill', d => segColor(d.id))
+  .attr('fill-opacity', 0.85)
+  .attr('stroke', d => segColor(d.id))
+  .attr('stroke-width', 1);
+
+nodeSel.append('text')
+  .attr('dx', d => Math.max(5, Math.min(14, Math.sqrt(d.charCount/120))) + 3)
+  .attr('dy', '0.35em')
+  .text(d => d.title.length > 24 ? d.title.slice(0,22) + '\\u2026' : d.title);
+
+// Tooltip
+const tooltip = document.getElementById('tooltip');
+nodeSel
+  .on('mouseover', (ev,d) => {
+    tooltip.style.display = 'block';
+    tooltip.innerHTML =
+      '<div class="title">'+esc(d.title)+'</div>'+
+      '<div class="path">'+esc(d.id)+'</div>'+
+      '<div class="stats">'+d.charCount.toLocaleString()+' chars · '+d.sectionsCount+' sections</div>';
+    if (!selectedNodeId) highlightNode(d);
+  })
+  .on('mousemove', ev => {
+    tooltip.style.left = (ev.clientX+14)+'px';
+    tooltip.style.top  = (ev.clientY+14)+'px';
+  })
+  .on('mouseout', () => {
+    tooltip.style.display='none';
+    if (!selectedNodeId) clearHighlight();
+  })
+  .on('click', (ev,d) => {
+    ev.stopPropagation();
+    if (selectedNodeId === d.id) {
+      selectedNodeId = null;
+      clearHighlight();
+      closePanel();
+    } else {
+      selectedNodeId = d.id;
+      highlightNode(d);
+      openPanel(d);
+    }
+  });
+
+function esc(s) {
+  return String(s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function highlightNode(d) {
+  const ln = adjLink.get(d.id) ?? new Set();
+  const sn = adjSemantic.get(d.id) ?? new Set();
+  const all = new Set([...ln, ...sn]);
+  nodeSel
+    .classed('dimmed',     n => n.id !== d.id && !all.has(n.id))
+    .classed('highlighted',n => n.id !== d.id && all.has(n.id))
+    .classed('selected',   n => n.id === d.id);
+  linkSel.classed('highlighted',
+    e => e.source.id === d.id || e.target.id === d.id);
+  semanticLinkSel.classed('highlighted',
+    e => e.source.id === d.id || e.target.id === d.id);
+}
+
+function clearHighlight() {
+  selectedNodeId = null;
+  nodeSel.classed('dimmed',false).classed('highlighted',false).classed('selected',false);
+  linkSel.classed('highlighted',false);
+  semanticLinkSel.classed('highlighted',false);
+}
+
+// ── Side panel ────────────────────────────────────────────────────────────────
+
+const panel      = document.getElementById('panel');
+const panelTitle = document.getElementById('panel-title');
+const panelPath  = document.getElementById('panel-path');
+const panelStats = document.getElementById('panel-stats');
+const panelBody  = document.getElementById('panel-body');
+
+document.getElementById('panel-close').addEventListener('click', () => {
+  clearHighlight(); closePanel();
+});
+
+function openPanel(d) {
+  panelTitle.textContent = d.title;
+  panelPath.textContent  = d.id;
+  panelStats.textContent = d.charCount.toLocaleString()+' chars · '+d.sectionsCount+' sections';
+  panelBody.innerHTML = '';
+
+  // Sections
+  if (d.sections && d.sections.length > 0) {
+    const sec = ps('Sections ('+d.sections.length+')');
+    const ul = document.createElement('ul');
+    const shown = d.sections.slice(0,10);
+    for (const s of shown) {
+      const li = document.createElement('li');
+      const label = s.headingPath.length > 0
+        ? s.headingPath[s.headingPath.length-1]
+        : (s.anchor ?? '(section)');
+      li.innerHTML = esc(label)+(s.anchor ? ' <span class="kind">#'+esc(s.anchor)+'</span>' : '');
+      ul.appendChild(li);
+    }
+    if (d.sections.length > 10) {
+      const li = document.createElement('li');
+      li.className = 'empty';
+      li.textContent = '… and '+(d.sections.length-10)+' more';
+      ul.appendChild(li);
+    }
+    sec.appendChild(ul); panelBody.appendChild(sec);
+  }
+
+  // Outgoing links
+  {
+    const out = d.outgoing || [];
+    const sec = ps('Links from this page'+(out.length ? ' ('+out.length+')' : ''));
+    if (out.length > 0) {
+      const ul = document.createElement('ul');
+      for (const o of out.slice(0,15)) {
+        const li = document.createElement('li');
+        const a = document.createElement('a');
+        a.textContent = (o.label && o.label !== o.target) ? o.label : o.target;
+        a.title = o.target;
+        a.addEventListener('click', ()=>focusNode(o.target));
+        li.appendChild(a);
+        const sp = document.createElement('span');
+        sp.className = 'kind'; sp.textContent = o.kind;
+        li.appendChild(sp);
+        ul.appendChild(li);
+      }
+      if (out.length > 15) {
+        const li = document.createElement('li');
+        li.className = 'empty';
+        li.textContent = '… and '+(out.length-15)+' more';
+        ul.appendChild(li);
+      }
+      sec.appendChild(ul);
+    } else {
+      sec.appendChild(empty('None'));
+    }
+    panelBody.appendChild(sec);
+  }
+
+  // Incoming links
+  {
+    const inc = d.incoming || [];
+    const sec = ps('Pages linking here'+(inc.length ? ' ('+inc.length+')' : ''));
+    if (inc.length > 0) {
+      const ul = document.createElement('ul');
+      for (const i of inc.slice(0,15)) {
+        const li = document.createElement('li');
+        const a = document.createElement('a');
+        a.textContent = i.source; a.title = i.source;
+        a.addEventListener('click', ()=>focusNode(i.source));
+        li.appendChild(a);
+        ul.appendChild(li);
+      }
+      if (inc.length > 15) {
+        const li = document.createElement('li');
+        li.className = 'empty';
+        li.textContent = '… and '+(inc.length-15)+' more';
+        ul.appendChild(li);
+      }
+      sec.appendChild(ul);
+    } else {
+      sec.appendChild(empty('None (orphan page)'));
+    }
+    panelBody.appendChild(sec);
+  }
+
+  // Semantic similar
+  if (HAS_SEMANTIC) {
+    const sim2 = d.topSimilar || [];
+    const sec = ps('Semantically similar'+(sim2.length ? ' ('+sim2.length+')' : ''));
+    if (sim2.length > 0) {
+      const ul = document.createElement('ul');
+      for (const s of sim2) {
+        const li = document.createElement('li');
+        const a = document.createElement('a');
+        a.textContent = s.title ?? s.path; a.title = s.path;
+        a.addEventListener('click', ()=>focusNode(s.path));
+        li.appendChild(a);
+        const sp = document.createElement('span');
+        sp.className = 'score'; sp.textContent = s.score.toFixed(3);
+        li.appendChild(sp);
+        ul.appendChild(li);
+      }
+      sec.appendChild(ul);
+    } else {
+      sec.appendChild(empty('No pages above threshold'));
+    }
+    panelBody.appendChild(sec);
+  }
+
+  panel.classList.add('open');
+  graphWrap.classList.add('panel-open');
+  if (sim) sim.force('center', d3.forceCenter(wrapW()/2, wrapH()/2)).alpha(0.1).restart();
+}
+
+function closePanel() {
+  panel.classList.remove('open');
+  graphWrap.classList.remove('panel-open');
+  if (sim) sim.force('center', d3.forceCenter(wrapW()/2, wrapH()/2)).alpha(0.1).restart();
+}
+
+function focusNode(nodeId) {
+  const node = DATA.nodes.find(n => n.id === nodeId);
+  if (!node) return;
+  selectedNodeId = nodeId;
+  highlightNode(node);
+  openPanel(node);
+}
+
+function ps(heading) {
+  const div = document.createElement('div'); div.className = 'panel-section';
+  const h3 = document.createElement('h3'); h3.textContent = heading;
+  div.appendChild(h3); return div;
+}
+function empty(text) {
+  const p = document.createElement('p'); p.className = 'empty'; p.textContent = text; return p;
+}
+
+// ── Checkbox toggles ──────────────────────────────────────────────────────────
+
+document.getElementById('chk-links').addEventListener('change', ev => {
+  linkSel.style('display', ev.target.checked ? null : 'none');
+});
+document.getElementById('chk-semantic').addEventListener('change', ev => {
+  semanticLinkSel.style('display', ev.target.checked ? null : 'none');
+});
+
+// ── Force simulation ──────────────────────────────────────────────────────────
+
+const allSimEdges = [...DATA.edges, ...DATA.semanticEdges];
+
+const sim = d3.forceSimulation(DATA.nodes)
+  .force('link', d3.forceLink(allSimEdges).id(d => d.id)
+    .distance(80).strength(e => e.kind === 'semantic' ? 0.2 : 0.5))
+  .force('charge', d3.forceManyBody().strength(-180))
+  .force('center', d3.forceCenter(wrapW()/2, wrapH()/2))
+  .force('collide', d3.forceCollide(18))
+  .on('tick', () => {
+    linkSel
+      .attr('x1', d => d.source.x).attr('y1', d => d.source.y)
+      .attr('x2', d => d.target.x).attr('y2', d => d.target.y);
+    semanticLinkSel
+      .attr('x1', d => d.source.x).attr('y1', d => d.source.y)
+      .attr('x2', d => d.target.x).attr('y2', d => d.target.y);
+    nodeSel.attr('transform', d => 'translate('+d.x+','+d.y+')');
+  });
+</script>
+</body>
+</html>`
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
@@ -554,14 +1002,65 @@ async function main(): Promise<void> {
         options: {
           format: { type: "string" },
           out: { type: "string" },
+          semantic: { type: "boolean" },
+          "sim-threshold": { type: "string" },
+          "sim-top-k": { type: "string" },
+          model: { type: "string" },
         },
         allowPositionals: true,
       })
       const docsDir = positionals[0] ?? die("graph requires <docs-dir>")
       const format = (values.format ?? "json") as "json" | "dot" | "mermaid" | "html"
+      const semantic = values.semantic ?? false
+      const simThreshold = values["sim-threshold"] !== undefined
+        ? parseFloat(values["sim-threshold"])
+        : 0.75
+      const simTopK = values["sim-top-k"] !== undefined
+        ? parseInt(values["sim-top-k"], 10)
+        : 5
+      const modelOverride = values.model
+
       const graph = buildGraph(docsDir)
       const raw = graph.toJSON()
       const data = buildGraphExport(raw)
+
+      if (semantic) {
+        try {
+          await addSemanticEdges(data, raw.pages, modelOverride, simThreshold, simTopK)
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          if (
+            msg.includes("OPENROUTER_API_KEY") ||
+            msg.includes("AI_GATEWAY_API_KEY") ||
+            msg.includes("assertApiKey") ||
+            msg.includes("API key") ||
+            msg.includes("api key")
+          ) {
+            process.stderr.write(
+              "Error: --semantic requires an API key.\n" +
+              "  Set OPENROUTER_API_KEY=<key>  (OpenRouter — recommended)\n" +
+              "  or AI_GATEWAY_API_KEY=<key>   (Vercel AI Gateway)\n\n" +
+              "  Default model: openai/text-embedding-3-small\n" +
+              "  To override: --model openai/text-embedding-3-small\n" +
+              "  If the model name is rejected try: --model text-embedding-3-small (no prefix)\n"
+            )
+            process.exit(1)
+          }
+          if (
+            msg.toLowerCase().includes("model") ||
+            msg.includes("404") ||
+            msg.includes("not found")
+          ) {
+            process.stderr.write(
+              "Error computing semantic embeddings: " + msg + "\n" +
+              "  Tip: try --model text-embedding-3-small (no openai/ prefix)\n" +
+              "  or   --model openai/text-embedding-3-small (with prefix for OpenRouter)\n"
+            )
+            process.exit(1)
+          }
+          throw err
+        }
+      }
 
       let result: string
       switch (format) {
@@ -575,7 +1074,7 @@ async function main(): Promise<void> {
           result = renderGraphMermaid(data)
           break
         case "html":
-          result = renderGraphHtml(data, docsDir)
+          result = renderGraphHtml(data, docsDir, semantic && data.semanticEdges.length > 0)
           break
         default:
           die(`Unknown format: ${format}. Use json, dot, mermaid, or html.`)
@@ -636,7 +1135,6 @@ async function main(): Promise<void> {
       const topN = scored.slice(0, limit)
 
       const results = topN.map(({ page, score }) => {
-        // Extract a short snippet (first 200 chars of content)
         const snippet = page.content.slice(0, 200).replace(/\s+/g, " ").trim()
         return {
           pagePath: page.path,
@@ -657,6 +1155,9 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
-  process.stderr.write("[markdown-lsp] Fatal error: " + (err instanceof Error ? err.stack ?? err.message : String(err)) + "\n")
+  process.stderr.write(
+    "[markdown-lsp] Fatal error: " +
+    (err instanceof Error ? err.stack ?? err.message : String(err)) + "\n"
+  )
   process.exit(1)
 })

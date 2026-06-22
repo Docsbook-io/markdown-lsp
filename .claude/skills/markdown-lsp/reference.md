@@ -69,27 +69,55 @@ Returns: single `Link` object or `null`
 Read a specific section by its anchor slug. Get anchors from `outline` first.
 Returns: `Section` object
 
-### `graph <docs-dir> [--format json|dot|mermaid|html] [--out <file>]`
-Export the full page link graph.
+### `graph <docs-dir> [--format json|dot|mermaid|html] [--out <file>] [--semantic] [--sim-threshold n] [--sim-top-k n] [--model m]`
 
-- `--format json` (default): `{ nodes, edges, unresolvedCount }` — machine-readable
-- `--format dot`: Graphviz DOT format for rendering with `dot` / graphviz tools
+Export the full page link graph, optionally with AI-powered semantic similarity edges.
+
+**Base flags:**
+- `--format json` (default): machine-readable `{ nodes, edges, semanticEdges, unresolvedCount }`
+- `--format dot`: Graphviz DOT format
 - `--format mermaid`: Mermaid flowchart for embedding in markdown
-- `--format html`: Self-contained interactive HTML with D3 force-directed graph (drag, zoom, hover highlights)
-- `--out <file>`: write to file instead of stdout (recommended for `--format html`)
+- `--format html`: Self-contained interactive HTML (D3 force graph, drag/zoom/click side-panel)
+- `--out <file>`: write to file instead of stdout (recommended for html)
+
+**Semantic flags (v1.2):**
+- `--semantic`: enable AI similarity edges (requires `OPENROUTER_API_KEY` or `AI_GATEWAY_API_KEY`)
+- `--sim-threshold <float>`: minimum cosine similarity to draw an edge (default: `0.75`)
+- `--sim-top-k <int>`: max semantic neighbours per node (default: `5`)
+- `--model <string>`: embedding model override (default: `openai/text-embedding-3-small`)
 
 ```bash
+# Link graph only
 node_modules/.bin/markdown-lsp graph ./docs --format json --pretty
 node_modules/.bin/markdown-lsp graph ./docs --format dot > graph.dot
 node_modules/.bin/markdown-lsp graph ./docs --format mermaid
 node_modules/.bin/markdown-lsp graph ./docs --format html --out graph.html
+
+# Turnkey semantic graph (v1.2)
+OPENROUTER_API_KEY=sk-or-... node_modules/.bin/markdown-lsp graph ./docs --format html --semantic --out sg.html
+OPENROUTER_API_KEY=sk-or-... node_modules/.bin/markdown-lsp graph ./docs --format html --semantic \
+  --sim-threshold 0.75 --sim-top-k 5 --model openai/text-embedding-3-small --out sg.html
 ```
 
-JSON shape:
+**HTML graph features (v1.2):**
+- Solid lines = explicit markdown link edges; dashed amber lines = semantic similarity edges
+- Toolbar checkboxes to toggle each edge type on/off
+- Click a node: opens side-panel with title, path, char count, sections, outgoing links,
+  incoming links, and top semantically similar pages (with scores)
+- Click a page in the side-panel: focuses the graph on that node
+- Background click: closes panel + clears highlight
+- Drag and zoom preserved
+
+JSON shape (v1.2):
 ```json
 {
-  "nodes": [{"id": "README.md", "title": "Docsbook", "charCount": 2634, "sectionsCount": 10}],
-  "edges": [{"source": "README.md", "target": "quick-start.md", "kind": "inline", "label": "Get started"}],
+  "nodes": [{"id":"README.md","title":"Docsbook","charCount":2634,"sectionsCount":10,
+             "sections":[{"anchor":"intro","headingPath":["Intro"],"level":2}],
+             "outgoing":[{"target":"guide.md","label":"Guide","kind":"inline"}],
+             "incoming":[],
+             "topSimilar":[{"path":"guide.md","title":"Guide","score":0.8123}]}],
+  "edges": [{"source":"README.md","target":"quick-start.md","kind":"inline","label":"Get started"}],
+  "semanticEdges": [{"source":"README.md","target":"guide.md","score":0.8123,"kind":"semantic"}],
   "unresolvedCount": 3
 }
 ```
@@ -119,26 +147,31 @@ Returns: `SemanticHit[]`
 ## Key return types
 
 ```
-PageSummary  { path, title, headingsCount, charCount }
-OutlineNode  { name, level, anchor, range, children: OutlineNode[] }
-SearchHit    { pagePath, pageTitle, headingPath[], anchor, snippet, range, matchScore? }
-SymbolHit    { name, containerName, pagePath, anchor, range }
-Link         { fromPath, toPath, toResolvedPath, toAnchor, kind, textAtLink,
-               positionStartLine, positionStartCol, positionEndLine, positionEndCol }
-Section      { headingPath[], anchor, level, charCount, content, positionStartLine, positionEndLine }
-Range        { start: {line, col}, end: {line, col} }
-GraphNode    { id, title, charCount, sectionsCount }
-GraphEdge    { source, target, kind, label? }
-GraphExport  { nodes: GraphNode[], edges: GraphEdge[], unresolvedCount }
-SemanticHit  { pagePath, pageTitle, score, snippet }
+PageSummary   { path, title, headingsCount, charCount }
+OutlineNode   { name, level, anchor, range, children: OutlineNode[] }
+SearchHit     { pagePath, pageTitle, headingPath[], anchor, snippet, range, matchScore? }
+SymbolHit     { name, containerName, pagePath, anchor, range }
+Link          { fromPath, toPath, toResolvedPath, toAnchor, kind, textAtLink,
+                positionStartLine, positionStartCol, positionEndLine, positionEndCol }
+Section       { headingPath[], anchor, level, charCount, content, positionStartLine, positionEndLine }
+Range         { start: {line, col}, end: {line, col} }
+GraphNode     { id, title, charCount, sectionsCount,
+                sections: [{anchor, headingPath[], level}],
+                outgoing: [{target, label, kind}],
+                incoming: [{source, label, kind}],
+                topSimilar: [{path, title, score}] }
+GraphEdge     { source, target, kind, label? }
+SemanticEdge  { source, target, score, kind: "semantic" }
+GraphExport   { nodes: GraphNode[], edges: GraphEdge[], semanticEdges: SemanticEdge[], unresolvedCount }
+SemanticHit   { pagePath, pageTitle, score, snippet }
 ```
 
 ## Environment variables
 
 | Variable | Purpose |
 |---|---|
-| `OPENROUTER_API_KEY` | OpenRouter API key — enables `semantic-search` (takes priority) |
-| `AI_GATEWAY_API_KEY` | Vercel AI Gateway key — fallback for `semantic-search` and LSP AI features |
+| `OPENROUTER_API_KEY` | OpenRouter API key — enables `semantic-search` and `graph --semantic` (takes priority) |
+| `AI_GATEWAY_API_KEY` | Vercel AI Gateway key — fallback for AI features |
 | `AI_GATEWAY_BASE_URL` | Override gateway base URL (default depends on which key is set) |
 | `EMBEDDING_MODEL` | Default embedding model (default: `openai/text-embedding-3-small`) |
 | `MARKDOWN_LSP_AI_ENABLED` | Set to `1` to enable full LSP AI features (embeddings + extraction) |
@@ -147,7 +180,11 @@ SemanticHit  { pagePath, pageTitle, score, snippet }
 
 OpenRouter supports the embeddings endpoint at `https://openrouter.ai/api/v1/embeddings`.
 Model names **must include the provider prefix**: `openai/text-embedding-3-small` (not bare `text-embedding-3-small`).
-This is already the default in markdown-lsp v1.1.0+.
+This is already the default in markdown-lsp v1.2.0+.
+
+When using Vercel AI Gateway (`AI_GATEWAY_API_KEY`), use bare names: `text-embedding-3-small`.
+
+If the model name is rejected, the CLI outputs a clear hint to try the other form.
 
 ## MCP-to-CLI correspondence
 
