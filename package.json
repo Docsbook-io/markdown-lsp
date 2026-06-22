@@ -1,22 +1,23 @@
 {
   "name": "markdown-lsp",
-  "version": "0.2.2",
+  "version": "1.0.0",
   "description": "Language Server Protocol implementation for Markdown with optional AI-canonicalized glossary that resolves synonyms across docs",
   "type": "module",
   "bin": {
     "markdown-lsp": "./bin/markdown-lsp"
   },
-  "main": "./dist/server.js",
+  "main": "./dist/lsp.js",
   "exports": {
-    ".": "./dist/server.js",
+    ".": "./dist/lsp.js",
     "./bridge": "./dist/bridge/index.js",
     "./indexer": "./dist/indexer/indexer.js",
     "./core": "./dist/core/index.js",
-    "./parser": "./dist/indexer/parseMarkdown.js"
+    "./parser": "./dist/indexer/parseMarkdown.js",
+    "./graph": "./dist/graph.js"
   },
   "scripts": {
     "build": "tsc",
-    "dev": "tsx src/server.ts --stdio",
+    "dev": "tsx src/lsp.ts --stdio",
     "migrate": "tsx scripts/apply-migration.ts",
     "test": "vitest run",
     "test:fast": "vitest run test/parseMarkdown.test.ts test/bridge.test.ts test/ai-disabled.test.ts",
