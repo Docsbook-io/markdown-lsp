@@ -201,6 +201,19 @@ If a file changes, its hash changes, so it is re-embedded automatically (no stal
 | After `index --granularity heading` (~1190 sections) | 1 (query only) | ~1/1190 |
 | `index` re-run with no changes | 0 | free |
 
+### Incremental & token-saving: re-run `index` anytime
+
+`index ./docs` is incremental by design — only changed units are re-embedded, unchanged ones are
+served from the local cache (`.markdown-lsp-cache/embeddings/`). You can call it as frequently as
+you like without wasting API tokens on content that hasn't changed.
+
+To automate re-indexing, the recommended approach is a **git hook** (no extra deps, no debounce
+complexity): a `post-merge` or `post-checkout` hook runs `npx markdown-lsp index ./docs` automatically
+after pulls and branch switches. For real-time updates while writing docs, a debounced watch script
+(stdlib `fs.watch` with a 3-5 s debounce) works well. CI users can cache `.markdown-lsp-cache/`
+via `actions/cache` so the index survives across runs. See the [skill file](.claude/skills/markdown-lsp/SKILL.md)
+for ready-to-use snippets for all three patterns.
+
 ---
 
 ## Semantic search with granularity
