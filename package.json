@@ -1,6 +1,6 @@
 {
   "name": "markdown-lsp",
-  "version": "1.2.1",
+  "version": "1.3.0",
   "description": "Language Server Protocol implementation for Markdown with optional AI-canonicalized glossary that resolves synonyms across docs",
   "type": "module",
   "bin": {

@@ -1,4 +1,4 @@
-# markdown-lsp CLI — Full Reference
+# markdown-lsp CLI — Full Reference (v1.3.0)
 
 CLI entry: `node_modules/.bin/markdown-lsp` (or `node node_modules/markdown-lsp/dist/cli.js`).
 All subcommands write JSON to stdout. Use `--pretty` for human-readable indentation.
@@ -69,7 +69,45 @@ Returns: single `Link` object or `null`
 Read a specific section by its anchor slug. Get anchors from `outline` first.
 Returns: `Section` object
 
-### `graph <docs-dir> [--format json|dot|mermaid|html] [--out <file>] [--semantic] [--sim-threshold n] [--sim-top-k n] [--model m]`
+### `index <docs-dir> [--granularity page|heading|line] [--model m]` (v1.3 NEW)
+
+Build the persistent semantic index — embeds all doc units at the chosen granularity and caches
+them to `.markdown-lsp-cache/embeddings/`. Subsequent `semantic-search` and `graph --semantic`
+calls reuse the cache and only embed the query (1 API round-trip instead of N).
+
+Idempotent: re-running without doc changes costs 0 API calls (all cache hits).
+Changed files are re-embedded automatically (cache key = `sha256(model + text)`).
+
+- `--granularity page`: index whole pages (default)
+- `--granularity heading`: index sections (recommended — best precision, ~8–15x more units)
+- `--granularity line`: index paragraph blocks (finest granularity, ~40x more units)
+- `--model <m>`: embedding model override (default: `openai/text-embedding-3-small`)
+
+Requires `OPENROUTER_API_KEY` or `AI_GATEWAY_API_KEY`.
+
+```bash
+# Build index at heading granularity (recommended)
+OPENROUTER_API_KEY=sk-or-... node_modules/.bin/markdown-lsp index ./docs --granularity heading
+
+# Re-run — costs 0 API tokens if docs unchanged
+OPENROUTER_API_KEY=sk-or-... node_modules/.bin/markdown-lsp index ./docs --granularity heading
+```
+
+Returns: `IndexResult`
+```json
+{
+  "docsDir": "./docs",
+  "granularity": "heading",
+  "totalUnits": 1190,
+  "newlyEmbedded": 1190,
+  "fromCache": 0,
+  "tokensUsed": 45000,
+  "elapsedMs": 8200,
+  "model": "openai/text-embedding-3-small"
+}
+```
+
+### `graph <docs-dir> [--format json|dot|mermaid|html] [--out <file>] [--semantic] [--granularity page|heading] [--sim-threshold n] [--sim-top-k n] [--model m]`
 
 Export the full page link graph, optionally with AI-powered semantic similarity edges.
 
@@ -80,8 +118,11 @@ Export the full page link graph, optionally with AI-powered semantic similarity 
 - `--format html`: Self-contained interactive HTML (D3 force graph, drag/zoom/click side-panel)
 - `--out <file>`: write to file instead of stdout (recommended for html)
 
-**Semantic flags (v1.2):**
+**Semantic flags (v1.2+):**
 - `--semantic`: enable AI similarity edges (requires `OPENROUTER_API_KEY` or `AI_GATEWAY_API_KEY`)
+- `--granularity page` (default): graph nodes = pages
+- `--granularity heading` (v1.3): graph nodes = sections (heading-level). Replaces page-nodes with section-nodes; semantic edges between sections. Side-panel shows heading breadcrumb.
+- `--granularity line`: NOT supported for graph (too many nodes — use `page` or `heading`)
 - `--sim-threshold <float>`: minimum cosine similarity to draw an edge (default: `0.75`)
 - `--sim-top-k <int>`: max semantic neighbours per node (default: `5`)
 - `--model <string>`: embedding model override (default: `openai/text-embedding-3-small`)
@@ -89,59 +130,60 @@ Export the full page link graph, optionally with AI-powered semantic similarity 
 ```bash
 # Link graph only
 node_modules/.bin/markdown-lsp graph ./docs --format json --pretty
-node_modules/.bin/markdown-lsp graph ./docs --format dot > graph.dot
-node_modules/.bin/markdown-lsp graph ./docs --format mermaid
 node_modules/.bin/markdown-lsp graph ./docs --format html --out graph.html
 
-# Turnkey semantic graph (v1.2)
+# Page-level semantic graph
 OPENROUTER_API_KEY=sk-or-... node_modules/.bin/markdown-lsp graph ./docs --format html --semantic --out sg.html
+
+# Heading-level semantic graph (v1.3 — section nodes)
 OPENROUTER_API_KEY=sk-or-... node_modules/.bin/markdown-lsp graph ./docs --format html --semantic \
-  --sim-threshold 0.75 --sim-top-k 5 --model openai/text-embedding-3-small --out sg.html
+  --granularity heading --sim-threshold 0.75 --sim-top-k 5 --out sg-headings.html
 ```
 
-**HTML graph features (v1.2):**
-- Solid lines = explicit markdown link edges; dashed amber lines = semantic similarity edges
+HTML graph features:
+- Solid lines = explicit markdown link edges; dashed amber = semantic similarity edges
 - Toolbar checkboxes to toggle each edge type on/off
-- Click a node: opens side-panel with title, path, char count, sections, outgoing links,
-  incoming links, and top semantically similar pages (with scores)
+- Click a node: side-panel shows title, path/heading-path, char count, outgoing links, incoming links, top similar
 - Click a page in the side-panel: focuses the graph on that node
 - Background click: closes panel + clears highlight
-- Drag and zoom preserved
 
-JSON shape (v1.2):
-```json
-{
-  "nodes": [{"id":"README.md","title":"Docsbook","charCount":2634,"sectionsCount":10,
-             "sections":[{"anchor":"intro","headingPath":["Intro"],"level":2}],
-             "outgoing":[{"target":"guide.md","label":"Guide","kind":"inline"}],
-             "incoming":[],
-             "topSimilar":[{"path":"guide.md","title":"Guide","score":0.8123}]}],
-  "edges": [{"source":"README.md","target":"quick-start.md","kind":"inline","label":"Get started"}],
-  "semanticEdges": [{"source":"README.md","target":"guide.md","score":0.8123,"kind":"semantic"}],
-  "unresolvedCount": 3
-}
-```
+### `semantic-search <docs-dir> <query> [--limit n] [--model m] [--granularity page|heading|line]` (v1.3 granularity NEW)
 
-### `semantic-search <docs-dir> <query> [--limit n] [--model <model>]`
-AI-powered semantic search using text embeddings. Computes cosine similarity in-memory.
-Results cached in `.markdown-lsp-cache/embeddings/` (sha256 keyed per text+model).
-
-```bash
-OPENROUTER_API_KEY=sk-or-... node_modules/.bin/markdown-lsp semantic-search ./docs "webhook setup" --limit 5
-node_modules/.bin/markdown-lsp semantic-search ./docs "authentication" --model openai/text-embedding-3-small --limit 3
-```
+AI-powered semantic search using text embeddings. Three granularity levels, all using the same disk cache.
 
 - `--limit n`: number of results (default: 10)
 - `--model <model>`: embedding model override (default: `openai/text-embedding-3-small`)
-- Requires: `OPENROUTER_API_KEY` (OpenRouter) OR `AI_GATEWAY_API_KEY` (Vercel AI Gateway)
-- Without a key: exits with a clear error message (no stack trace)
+- `--granularity page` (default): embed + search whole pages
+- `--granularity heading`: embed + search sections (returns `anchor`, `headingPath`)
+- `--granularity line`: embed + search paragraph blocks (returns `line` number)
+- Requires: `OPENROUTER_API_KEY` OR `AI_GATEWAY_API_KEY`
+- Without a key: exits with a clear error (no stack trace)
 
-Returns: `SemanticHit[]`
+```bash
+# Page-level (default)
+OPENROUTER_API_KEY=sk-or-... node_modules/.bin/markdown-lsp semantic-search ./docs "webhook setup" --limit 5
+
+# Heading-level
+OPENROUTER_API_KEY=sk-or-... node_modules/.bin/markdown-lsp semantic-search ./docs "webhook auth" \
+  --granularity heading --limit 10
+
+# Line-level (paragraph blocks)
+OPENROUTER_API_KEY=sk-or-... node_modules/.bin/markdown-lsp semantic-search ./docs "rate limit" \
+  --granularity line --limit 5
+```
+
+Returns: `SemanticHit[]` — shape varies by level:
+
 ```json
-[
-  {"pagePath": "webhooks.md", "pageTitle": "Webhooks", "score": 0.8923, "snippet": "Webhooks let you..."},
-  {"pagePath": "api/auth.md", "pageTitle": "Authentication", "score": 0.7611, "snippet": "To authenticate..."}
-]
+// page
+[{"level":"page","pagePath":"webhooks.md","pageTitle":"Webhooks","score":0.8923,"snippet":"..."}]
+
+// heading
+[{"level":"heading","pagePath":"webhooks.md","pageTitle":"Webhooks","anchor":"webhook-signing",
+  "headingPath":["Webhooks","Webhook Signing"],"score":0.8611,"snippet":"..."}]
+
+// line
+[{"level":"line","pagePath":"webhooks.md","pageTitle":"Webhooks","line":42,"score":0.8234,"snippet":"..."}]
 ```
 
 ## Key return types
@@ -155,7 +197,8 @@ Link          { fromPath, toPath, toResolvedPath, toAnchor, kind, textAtLink,
                 positionStartLine, positionStartCol, positionEndLine, positionEndCol }
 Section       { headingPath[], anchor, level, charCount, content, positionStartLine, positionEndLine }
 Range         { start: {line, col}, end: {line, col} }
-GraphNode     { id, title, charCount, sectionsCount,
+GraphNode     { id, title, charCount, sectionsCount, nodeType?: "page"|"heading",
+                headingPath?: string[], pagePath?: string,
                 sections: [{anchor, headingPath[], level}],
                 outgoing: [{target, label, kind}],
                 incoming: [{source, label, kind}],
@@ -163,14 +206,17 @@ GraphNode     { id, title, charCount, sectionsCount,
 GraphEdge     { source, target, kind, label? }
 SemanticEdge  { source, target, score, kind: "semantic" }
 GraphExport   { nodes: GraphNode[], edges: GraphEdge[], semanticEdges: SemanticEdge[], unresolvedCount }
-SemanticHit   { pagePath, pageTitle, score, snippet }
+SemanticHit   { level, pagePath, pageTitle, score, snippet,
+                anchor?: string, headingPath?: string[],  // heading only
+                line?: number }                            // line only
+IndexResult   { docsDir, granularity, totalUnits, newlyEmbedded, fromCache, tokensUsed, elapsedMs, model }
 ```
 
 ## Environment variables
 
 | Variable | Purpose |
 |---|---|
-| `OPENROUTER_API_KEY` | OpenRouter API key — enables `semantic-search` and `graph --semantic` (takes priority) |
+| `OPENROUTER_API_KEY` | OpenRouter API key — enables `semantic-search`, `index`, and `graph --semantic` (takes priority) |
 | `AI_GATEWAY_API_KEY` | Vercel AI Gateway key — fallback for AI features |
 | `AI_GATEWAY_BASE_URL` | Override gateway base URL (default depends on which key is set) |
 | `EMBEDDING_MODEL` | Default embedding model (default: `openai/text-embedding-3-small`) |
@@ -180,7 +226,7 @@ SemanticHit   { pagePath, pageTitle, score, snippet }
 
 OpenRouter supports the embeddings endpoint at `https://openrouter.ai/api/v1/embeddings`.
 Model names **must include the provider prefix**: `openai/text-embedding-3-small` (not bare `text-embedding-3-small`).
-This is already the default in markdown-lsp v1.2.0+.
+This is already the default in markdown-lsp v1.3.0+.
 
 When using Vercel AI Gateway (`AI_GATEWAY_API_KEY`), use bare names: `text-embedding-3-small`.
 

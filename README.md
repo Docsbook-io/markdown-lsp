@@ -6,9 +6,9 @@
 [![license](https://img.shields.io/npm/l/markdown-lsp.svg?style=flat-square)](https://github.com/Docsbook-io/markdown-lsp/blob/main/LICENSE)
 [![node](https://img.shields.io/node/v/markdown-lsp.svg?style=flat-square)](https://www.npmjs.com/package/markdown-lsp)
 
-CLI and library for querying Markdown documentation graphs. Point it at a folder of `.md` files and get instant full-text search, outline, link analysis, symbol lookup, interactive HTML graphs, and AI-powered semantic search — all as JSON.
+CLI and library for querying Markdown documentation graphs. Point it at a folder of `.md` files and get instant full-text search, outline, link analysis, symbol lookup, interactive HTML graphs, and AI-powered semantic search at page, heading, or paragraph granularity — all as JSON.
 
-**Status: v1.2.0. CLI is the default interface. LSP stdio mode available as a subcommand.**
+**Status: v1.3.0. CLI is the default interface. LSP stdio mode available as a subcommand.**
 
 ---
 
@@ -44,11 +44,20 @@ npx markdown-lsp graph ./docs --format json --pretty
 npx markdown-lsp graph ./docs --format dot | dot -Tsvg > graph.svg
 npx markdown-lsp graph ./docs --format mermaid
 
-# Build embeddings + interactive semantic graph in one command
-OPENROUTER_API_KEY=sk-or-... npx markdown-lsp graph ./docs --format html --semantic --out graph.html
+# ── Token-saving workflow: index once, search cheap ──────────────────────────
 
-# AI semantic search
-OPENROUTER_API_KEY=sk-or-... npx markdown-lsp semantic-search ./docs "how to configure webhooks"
+# Step 1: build the semantic index once (embeds all heading-level sections)
+OPENROUTER_API_KEY=sk-or-... npx markdown-lsp index ./docs --granularity heading
+
+# Step 2: search is now cheap — only the query is embedded (1 API round-trip)
+OPENROUTER_API_KEY=sk-or-... npx markdown-lsp semantic-search ./docs "how to configure webhooks" --granularity heading
+OPENROUTER_API_KEY=sk-or-... npx markdown-lsp semantic-search ./docs "rate limit error" --granularity line
+
+# Semantic graph — heading-level nodes (sections as graph nodes)
+OPENROUTER_API_KEY=sk-or-... npx markdown-lsp graph ./docs --format html --semantic --granularity heading --out graph-headings.html
+
+# Page-level semantic graph (classic)
+OPENROUTER_API_KEY=sk-or-... npx markdown-lsp graph ./docs --format html --semantic --out graph.html
 
 # LSP server (for editors)
 npx markdown-lsp lsp --stdio
@@ -83,8 +92,9 @@ All subcommands accept a **`--pretty`** flag for indented JSON output (compact b
 | `links-from` | `<docs-dir> <page>` | All links originating from `<page>` |
 | `resolve-link` | `<docs-dir> <from-page> <link-text>` | Resolve a specific link text from a page |
 | `get-section` | `<docs-dir> <page> <anchor>` | Get a section by anchor slug |
-| `graph` | `<docs-dir> [--format json\|dot\|mermaid\|html] [--out file] [--semantic] [--sim-threshold n] [--sim-top-k n] [--model m]` | Export doc link graph; `--semantic` adds AI similarity edges |
-| `semantic-search` | `<docs-dir> <query> [--limit n] [--model m]` | AI semantic search via embeddings |
+| `index` | `<docs-dir> [--granularity page\|heading\|line] [--model m]` | Build persistent semantic index (cache all embeddings once) |
+| `graph` | `<docs-dir> [--format json\|dot\|mermaid\|html] [--out file] [--semantic] [--granularity page\|heading] [--sim-threshold n] [--sim-top-k n] [--model m]` | Export doc link graph; `--semantic` adds AI similarity edges |
+| `semantic-search` | `<docs-dir> <query> [--limit n] [--model m] [--granularity page\|heading\|line]` | AI semantic search via embeddings |
 | `lsp` / `serve` | `[--stdio]` | Start the LSP stdio server |
 
 ### search-text modes
@@ -164,59 +174,61 @@ JSON output shape:
 
 ---
 
-## Turnkey semantic graph (v1.2)
+## Token-saving workflow: index once, search cheap
 
-Overlay AI-powered semantic similarity edges on top of the link graph — one command, no pipeline.
+The `index` command pre-builds and caches all document embeddings at the chosen granularity.
+After indexing, `semantic-search` and `graph --semantic` only need to embed the query — **1 API round-trip** instead of N.
 
 ```bash
-# Build embeddings + interactive semantic graph in one command
-OPENROUTER_API_KEY=sk-or-... markdown-lsp graph ./docs --format html --semantic --out graph.html
+# Build the index once (heading = section-level, best precision)
+OPENROUTER_API_KEY=sk-or-... markdown-lsp index ./docs --granularity heading
 
-# With explicit thresholds
-OPENROUTER_API_KEY=sk-or-... markdown-lsp graph ./docs --format html --semantic \
-  --sim-threshold 0.75 --sim-top-k 5 --out graph.html
+# Now search is cheap — only the query is sent to the API
+OPENROUTER_API_KEY=sk-or-... markdown-lsp semantic-search ./docs "how does auth work" --granularity heading
+OPENROUTER_API_KEY=sk-or-... markdown-lsp semantic-search ./docs "rate limit error" --granularity line
 ```
 
-**What you get in the HTML:**
+**Why it works:** embeddings are cached by `sha256(model + text)` in `.markdown-lsp-cache/embeddings/`.
+On the second run, every doc unit is a cache hit — only the query vector is fetched from the API.
+If a file changes, its hash changes, so it is re-embedded automatically (no stale results).
 
-- Two types of edges — **solid lines** (explicit markdown links) and **dashed amber lines** (semantic similarity)
-- **Checkboxes** in the toolbar to toggle each edge type independently
-- **Click any node** to open a side-panel showing: title, path, sections, outgoing links, incoming links, and top semantically similar pages with scores
-- Clicking a linked page in the side-panel focuses the graph on that node
-- Background click closes the panel and clears selection
-- Drag and zoom preserved from v1.1
+**Token cost comparison:**
 
-**Semantic flags:**
-
-| Flag | Default | Description |
+| Scenario | API round-trips | Relative cost |
 |---|---|---|
-| `--semantic` | off | Enable AI similarity edges |
-| `--sim-threshold` | `0.75` | Minimum cosine similarity score to draw an edge |
-| `--sim-top-k` | `5` | Max semantic neighbours per node |
-| `--model` | `openai/text-embedding-3-small` | Embedding model override |
-
-**Caching:** embeddings are cached in `.markdown-lsp-cache/embeddings/` — the second run is instant with 0 API calls.
-
-**OpenRouter model naming:** when using `OPENROUTER_API_KEY`, the model name requires the `openai/` prefix (e.g. `openai/text-embedding-3-small`). When using `AI_GATEWAY_API_KEY` (Vercel AI Gateway), use the bare name (`text-embedding-3-small`). If the model is rejected, the CLI outputs a clear hint to try the other form.
+| First `semantic-search` (78 pages, cold cache) | 2 (batch docs + query) | baseline |
+| Repeat `semantic-search` after warm cache | 1 (query only) | ~1/78 |
+| After `index --granularity heading` (~1190 sections) | 1 (query only) | ~1/1190 |
+| `index` re-run with no changes | 0 | free |
 
 ---
 
-## Semantic search
+## Semantic search with granularity
 
-AI-powered semantic search using text embeddings — finds conceptually related pages even if they
-don't contain the exact query words.
+AI-powered semantic search using text embeddings — finds conceptually related content even if it
+doesn't contain the exact query words.
 
 ```bash
-# Requires OPENROUTER_API_KEY (OpenRouter) or AI_GATEWAY_API_KEY (Vercel AI Gateway)
+# Page-level (default) — searches whole pages
 OPENROUTER_API_KEY=sk-or-... markdown-lsp semantic-search ./docs "how to configure webhooks" --limit 5
+
+# Heading-level — searches within sections (returns anchor + headingPath)
+OPENROUTER_API_KEY=sk-or-... markdown-lsp semantic-search ./docs "webhook authentication" \
+  --granularity heading --limit 10
+
+# Line-level — searches paragraph blocks (returns line number)
+OPENROUTER_API_KEY=sk-or-... markdown-lsp semantic-search ./docs "set OPENROUTER_API_KEY" \
+  --granularity line --limit 5
 
 # Override embedding model
 markdown-lsp semantic-search ./docs "authentication" --model openai/text-embedding-3-small --limit 3
 ```
 
-- Default embedding model: `openai/text-embedding-3-small` (via OpenRouter — model prefix required)
-- Results cached in `.markdown-lsp-cache/embeddings/` — second run is instant, no API call
-- Returns `[{ pagePath, pageTitle, score, snippet }]` sorted by cosine similarity
+**Result shape by granularity:**
+
+- `page`: `[{ level: "page", pagePath, pageTitle, score, snippet }]`
+- `heading`: `[{ level: "heading", pagePath, pageTitle, anchor, headingPath, score, snippet }]`
+- `line`: `[{ level: "line", pagePath, pageTitle, line, score, snippet }]`
 
 **Environment variables:**
 
@@ -225,6 +237,45 @@ markdown-lsp semantic-search ./docs "authentication" --model openai/text-embeddi
 | `OPENROUTER_API_KEY` | OpenRouter API key (takes priority if set) |
 | `AI_GATEWAY_API_KEY` | Vercel AI Gateway key (fallback) |
 | `EMBEDDING_MODEL` | Override default embedding model |
+
+---
+
+## Semantic graph (v1.2+)
+
+Overlay AI-powered semantic similarity edges on top of the link graph.
+
+```bash
+# Page-level semantic graph (classic)
+OPENROUTER_API_KEY=sk-or-... markdown-lsp graph ./docs --format html --semantic --out graph.html
+
+# Heading-level: graph nodes = sections, semantic edges between sections
+OPENROUTER_API_KEY=sk-or-... markdown-lsp graph ./docs --format html --semantic \
+  --granularity heading --sim-threshold 0.75 --sim-top-k 5 --out graph-headings.html
+```
+
+**What you get in the HTML:**
+
+- Two types of edges — **solid lines** (explicit markdown links) and **dashed amber lines** (semantic similarity)
+- **Checkboxes** in the toolbar to toggle each edge type independently
+- **Click any node** to open a side-panel showing: title, path, sections, outgoing links, incoming links, and top semantically similar pages/sections with scores
+- Clicking a linked page in the side-panel focuses the graph on that node
+- Background click closes the panel and clears selection
+
+**Semantic flags:**
+
+| Flag | Default | Description |
+|---|---|---|
+| `--semantic` | off | Enable AI similarity edges |
+| `--granularity` | `page` | `page` (nodes = pages) or `heading` (nodes = sections) |
+| `--sim-threshold` | `0.75` | Minimum cosine similarity score to draw an edge |
+| `--sim-top-k` | `5` | Max semantic neighbours per node |
+| `--model` | `openai/text-embedding-3-small` | Embedding model override |
+
+**Note:** `--granularity line` is not supported for `graph` (too many nodes). Use `page` or `heading`.
+
+**Caching:** embeddings are cached in `.markdown-lsp-cache/embeddings/` — the second run is instant with 0 API calls.
+
+**OpenRouter model naming:** when using `OPENROUTER_API_KEY`, the model name requires the `openai/` prefix (e.g. `openai/text-embedding-3-small`). When using `AI_GATEWAY_API_KEY` (Vercel AI Gateway), use the bare name (`text-embedding-3-small`). If the model is rejected, the CLI outputs a clear hint to try the other form.
 
 ---
 
@@ -301,7 +352,9 @@ export AI_GATEWAY_API_KEY=...   # Vercel AI Gateway
 
 - **CLI** — `node:util parseArgs`, zero extra deps, reads `.md` files into an in-memory graph
 - **Graph** — pure TypeScript, no DB needed; `buildGraph(docsRoot)` walks the directory tree
-- **Semantic graph** — in-memory cosine similarity (N×N in ~5ms); embeddings via OpenRouter or Vercel AI Gateway; disk-cached per sha256(model+text)
+- **Granular semantics** — `unitize(pages, granularity)` splits docs into page/heading/line units; `splitParagraphs()` groups by blank lines
+- **Persistent index** — `index` command pre-caches all embeddings; `embedTexts()` checks sha256 cache per unit before hitting the API
+- **Semantic graph** — in-memory cosine similarity; heading mode replaces page-nodes with section-nodes; embeddings via OpenRouter or Vercel AI Gateway; disk-cached per sha256(model+text)
 - **LSP** — `vscode-languageserver/node` over stdio; requires Postgres (Drizzle ORM, `mdlsp_` prefix)
 - **AI layer** (opt-in) — pgvector cosine search on canonical-term embeddings; `text-embedding-3-small` via Vercel AI Gateway
 - **Bridge** — pure in-memory search (searchText, searchTextRanked, searchSymbols, searchPaths, listPages)
@@ -326,8 +379,9 @@ pnpm test
 - **M3 — CLI-first interface** ✅ (v1.0.0)
 - **M4 — Graph export + HTML D3 visualisation** ✅ (v1.1.0)
 - **M5 — Turnkey semantic graph (graph --semantic)** ✅ (v1.2.0)
-- M6 — User overrides for the glossary (merge / split / rename / add_synonym)
-- M7 — Docsbook integration
+- **M6 — Granular semantics + persistent index** ✅ (v1.3.0)
+- M7 — User overrides for the glossary (merge / split / rename / add_synonym)
+- M8 — Docsbook integration
 
 ---
 
