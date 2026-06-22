@@ -6,51 +6,153 @@
 [![license](https://img.shields.io/npm/l/markdown-lsp.svg?style=flat-square)](https://github.com/Docsbook-io/markdown-lsp/blob/main/LICENSE)
 [![node](https://img.shields.io/node/v/markdown-lsp.svg?style=flat-square)](https://www.npmjs.com/package/markdown-lsp)
 
-Language Server Protocol implementation for Markdown documentation. Optional AI-powered semantic layer on top.
+CLI and library for querying Markdown documentation graphs. Point it at a folder of `.md` files and get instant full-text search, outline, link analysis, and symbol lookup — all as JSON.
 
-**Status: M1 complete, M2 (AI layer) opt-in.**
+**Status: v1.0.0. CLI is the default interface. LSP stdio mode available as a subcommand.**
 
-## Two layers
+---
 
-### Structural (default, no AI)
-
-Out of the box — like Marksman, but persisted in Postgres and addressable from a service.
-
-- `textDocument/documentSymbol` — heading outline
-- `workspace/symbol` — fuzzy subsequence search across all headings (e.g. `oaf` matches `OAuth flow`)
-- `textDocument/definition` — jump from a link to its target document
-- `textDocument/references` — find every page linking to the current document
-- `textDocument/completion` — wiki-link completion `[[...]]`
-- `textDocument/publishDiagnostics` — warnings for unresolved link targets
-- `workspace.executeCommand("markdownLsp/reindex")` — force re-index of the workspace
-- Incremental indexing via content-hash diff; watched-files cleanup
-
-This layer is fully deterministic, free, and runs offline against your Postgres.
-
-### Semantic (optional, AI-powered)
-
-Off by default. When enabled, an extract pass identifies canonical concepts per section so that
-references survive synonym variation (`auth` ≡ `authentication` ≡ `OAuth` ≡ `login`).
-
-Enable with:
+## Quick Start
 
 ```bash
-export MARKDOWN_LSP_AI_ENABLED=1
-export AI_GATEWAY_API_KEY=...   # Vercel AI Gateway
+# List all pages
+npx markdown-lsp workspace-outline ./docs
+
+# Full-text search (natural-language, ranked)
+npx markdown-lsp search-text ./docs "getting started"
+
+# Fuzzy heading search
+npx markdown-lsp search-symbols ./docs "auth" --limit 10
 ```
 
-If the flag is not set, no AI calls are ever made. The server starts and behaves as a
-pure-structural LSP — no key required.
+---
 
-## Architecture
+## Installation
 
-- LSP over stdio (`vscode-languageserver/node`) — works in any editor
-- pgvector (Neon serverless) for cosine search on canonical-term embeddings (only when AI layer is enabled)
-- Drizzle ORM; all tables prefixed `mdlsp_`
-- Vercel AI Gateway (`text-embedding-3-small` for embeddings, `gpt-4o-mini` for extraction) — when AI on
-- An optional MCP HTTP facade (M3) over the same handlers — for AI agents like Claude Code
+```bash
+npm install -g markdown-lsp
+# or per-project
+npm install markdown-lsp
+```
 
-## Setup
+Node.js >= 20 required.
+
+---
+
+## Subcommands
+
+All subcommands accept a **`--pretty`** flag for indented JSON output (compact by default).
+
+| Subcommand | Arguments | Description |
+|---|---|---|
+| `workspace-outline` | `<docs-dir> [--prefix p] [--limit n]` | List all pages with metadata |
+| `outline` | `<docs-dir> <page>` | Heading outline of a single page |
+| `search-text` | `<docs-dir> <query> [--mode ranked\|verbatim] [--regex] [--case-sensitive] [--prefix p] [--limit n] [--context n]` | Full-text search |
+| `search-symbols` | `<docs-dir> <query> [--limit n]` | Fuzzy subsequence search across headings |
+| `search-paths` | `<docs-dir> <glob>` | List pages matching a glob pattern |
+| `links-to` | `<docs-dir> <page>` | All pages that link to `<page>` |
+| `links-from` | `<docs-dir> <page>` | All links originating from `<page>` |
+| `resolve-link` | `<docs-dir> <from-page> <link-text>` | Resolve a specific link text from a page |
+| `get-section` | `<docs-dir> <page> <anchor>` | Get a section by anchor slug |
+| `lsp` / `serve` | `[--stdio]` | Start the LSP stdio server |
+
+### search-text modes
+
+- **ranked** (default) — tokenizes query, drops stop words, ranks by coverage/heading/proximity. Best for natural-language questions.
+- **verbatim** (`--mode verbatim`) — literal substring match. Use `--regex` for regex.
+
+### Output format
+
+All subcommands print JSON to stdout. Use `--pretty` for human-readable output:
+
+```bash
+markdown-lsp search-text ./docs "authentication" --limit 5 --pretty
+```
+
+---
+
+## Examples
+
+```bash
+# Workspace overview
+markdown-lsp workspace-outline ./docs --limit 20 --pretty
+
+# Find pages about authentication
+markdown-lsp search-text ./docs "authentication flow" --pretty
+
+# What links to README.md?
+markdown-lsp links-to ./docs README.md
+
+# Glob search: all files under api/
+markdown-lsp search-paths ./docs "api/**"
+
+# Outline of a specific page
+markdown-lsp outline ./docs quick-start.md --pretty
+
+# Find headings containing "auth"
+markdown-lsp search-symbols ./docs "auth" --limit 10
+
+# Resolve a link from a page
+markdown-lsp resolve-link ./docs README.md "Getting Started"
+
+# Get a specific section by anchor
+markdown-lsp get-section ./docs overview.md quick-links --pretty
+```
+
+---
+
+## LSP mode (editor integration)
+
+`markdown-lsp` also works as a Language Server Protocol server for editors (VS Code, Zed, Neovim, etc.).
+
+```bash
+# Recommended (v1.0.0+)
+npx markdown-lsp lsp --stdio
+
+# Back-compat — old LSP flag style still works so existing editor configs don't break
+npx markdown-lsp --stdio
+```
+
+The LSP server speaks the standard protocol over stdio. It requires a Postgres database for the structural index (see Setup below).
+
+### Editor configuration example (VS Code)
+
+In your `settings.json`:
+
+```json
+{
+  "markdown-lsp.serverPath": "markdown-lsp",
+  "markdown-lsp.args": ["lsp", "--stdio"]
+}
+```
+
+---
+
+## Use as a library
+
+```ts
+import { buildGraph, loadDocsAsFiles } from "markdown-lsp/graph"
+import { searchTextRanked, searchSymbols, listPages } from "markdown-lsp/bridge"
+
+const graph = buildGraph("./docs")
+const hits = searchTextRanked(graph, "authentication flow")
+const pages = listPages(graph, { limit: 50 })
+```
+
+Available entry points:
+- `markdown-lsp/bridge` — search functions + `RichDocGraph`, `buildInMemoryGraph`, types
+- `markdown-lsp/graph` — `buildGraph(docsRoot)`, `loadDocsAsFiles(docsRoot)`
+- `markdown-lsp/indexer` — SQLite/Postgres workspace indexer (for LSP use)
+- `markdown-lsp/core` — document symbols and references (for LSP use)
+- `markdown-lsp/parser` — raw Markdown parser
+
+---
+
+## LSP Setup (for editor / structural indexer use)
+
+The CLI subcommands work **without any database** — they build an in-memory graph on the fly.
+
+The LSP server requires Postgres (for the incremental index):
 
 ```bash
 pnpm install
@@ -59,34 +161,24 @@ pnpm migrate                       # runs scripts/apply-migration.ts against DAT
 pnpm build
 ```
 
-## Run
-
-LSP via stdio (for editor integration):
+Optional AI layer (semantic synonym resolution):
 
 ```bash
-node dist/server.js --stdio
+export MARKDOWN_LSP_AI_ENABLED=1
+export AI_GATEWAY_API_KEY=...   # Vercel AI Gateway
 ```
 
-`bin/markdown-lsp` wraps the same entry point as a CLI.
+---
 
-## Use from Docsbook
+## Architecture
 
-The structural layer is what Docsbook's "Source of Truth" feature wants. Wire it in like this:
+- **CLI** — `node:util parseArgs`, zero extra deps, reads `.md` files into an in-memory graph
+- **Graph** — pure TypeScript, no DB needed; `buildGraph(docsRoot)` walks the directory tree
+- **LSP** — `vscode-languageserver/node` over stdio; requires Postgres (Drizzle ORM, `mdlsp_` prefix)
+- **AI layer** (opt-in) — pgvector cosine search on canonical-term embeddings; `text-embedding-3-small` via Vercel AI Gateway
+- **Bridge** — pure in-memory search (searchText, searchTextRanked, searchSymbols, searchPaths, listPages)
 
-```ts
-import { ensureWorkspace, indexWorkspace } from "@docsbook/markdown-lsp/indexer"
-import { getDocumentSymbols, getWorkspaceSymbols } from "@docsbook/markdown-lsp/core"
-
-// after cloning a workspace repo into ./tmp/<workspace-id>/
-const ws = await ensureWorkspace("./tmp/42")
-await indexWorkspace(ws)
-
-// MCP tools then call:
-await getWorkspaceSymbols(ws, "auth")
-await findReferencesToDocument(ws, authDocId)
-```
-
-No AI required.
+---
 
 ## Tests
 
@@ -94,16 +186,20 @@ No AI required.
 pnpm test
 ```
 
-27 tests cover the parser, indexer, and core handlers (plus a small suite for the AI feature flag).
+27 tests cover the parser, indexer, core handlers, and bridge search functions.
+
+---
 
 ## Milestones
 
 - **M0 — Scaffold** ✅
 - **M1 — Structural layer** ✅
-- M2 — Semantic extract (opt-in, code present, awaiting live AI Gateway credit)
-- M3 — MCP HTTP facade
+- **M2 — Semantic extract** (opt-in, code present, awaiting live AI Gateway credit)
+- **M3 — CLI-first interface** ✅ (v1.0.0)
 - M4 — User overrides for the glossary (merge / split / rename / add_synonym)
 - M5 — Docsbook integration
+
+---
 
 ## License
 
