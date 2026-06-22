@@ -11,7 +11,7 @@ CLI and library for querying Markdown documentation graphs. Point it at a folder
 <img width="1709" height="980" alt="Screenshot 2026-06-22 at 13 37 53" src="https://github.com/user-attachments/assets/5c540cd3-d5c0-48ca-90fa-645a266cb0f7" />
 
 
-**Status: v1.3.0. CLI is the default interface. LSP stdio mode available as a subcommand.**
+**Status: v1.4.0. CLI is the default interface. LSP stdio mode available as a subcommand.**
 
 ---
 
@@ -65,6 +65,41 @@ OPENROUTER_API_KEY=sk-or-... npx markdown-lsp graph ./docs --format html --seman
 # LSP server (for editors)
 npx markdown-lsp lsp --stdio
 ```
+
+---
+
+## Quick Start with Claude Code (skill)
+
+Install the skill once — then ask Claude Code natural-language questions about your docs directly in chat:
+
+```bash
+npx skills add Docsbook-io/markdown-lsp
+```
+
+After installation, Claude Code will guide you through setup interactively. Just ask:
+
+```
+set up markdown-lsp for my project
+```
+
+The skill will ask you questions step by step — docs folder, API key, granularity — and configure everything in chat. Other things you can ask once installed:
+
+```
+build a semantic index of ./docs
+search my docs semantically for "how to configure webhooks"
+show me which pages link to getting-started.md
+find sections about rate limiting (heading-level search)
+show me a semantic graph of my docs
+set up a git hook to keep the index fresh after each merge
+```
+
+For semantic search and the graph, you need a free [OpenRouter](https://openrouter.ai/keys) key:
+
+```bash
+export OPENROUTER_API_KEY=sk-or-...
+```
+
+The skill sets everything up in chat — index, git hooks, and the interactive graph.
 
 ---
 
