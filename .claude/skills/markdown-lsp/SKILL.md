@@ -60,6 +60,21 @@ All subcommands print JSON to stdout. Add `--pretty` for indented output.
 
 For full argument details and JSON return shapes, see `reference.md`.
 
+## Enabling AI features (REQUIRED for semantic commands)
+
+As of v1.4.0 AI is **off by default**. Every AI command (`index`, `semantic-search`,
+`graph --semantic`) needs **both** env vars or it fails with
+`AI features are disabled. Set MARKDOWN_LSP_AI_ENABLED=1`:
+
+```bash
+export OPENROUTER_API_KEY=sk-or-...     # your key
+export MARKDOWN_LSP_AI_ENABLED=1        # opt in to embeddings
+```
+
+Set both once per shell (or inline before each command). All AI examples below assume
+`MARKDOWN_LSP_AI_ENABLED=1` is exported — they show only `OPENROUTER_API_KEY=...` for brevity,
+but the flag is still required.
+
 ## Token-saving workflow: index once, search cheap
 
 The `index` command pre-builds and caches all doc embeddings. After indexing, `semantic-search`
@@ -131,6 +146,10 @@ debounce logic is needed. The index is always fresh after you pull or change bra
 # .git/hooks/post-merge
 set -e
 cd "$(git rev-parse --show-toplevel)"
+# AI is off by default (v1.4.0+) — pull the key from .env* and opt in.
+KEY=$(grep -h '^OPENROUTER_API_KEY=' .env.local .env 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"'\''')
+[ -n "$KEY" ] || { echo "[markdown-lsp] no OPENROUTER_API_KEY — skipping reindex"; exit 0; }
+export OPENROUTER_API_KEY="$KEY" MARKDOWN_LSP_AI_ENABLED=1
 echo "[markdown-lsp] Re-indexing docs after merge..."
 npx markdown-lsp index ./docs --granularity heading
 echo "[markdown-lsp] Done."
@@ -146,6 +165,9 @@ NEW_HEAD="$2"
 BRANCH_SWITCH="$3"
 if [ "$BRANCH_SWITCH" = "1" ]; then
   cd "$(git rev-parse --show-toplevel)"
+  KEY=$(grep -h '^OPENROUTER_API_KEY=' .env.local .env 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"'\''')
+  [ -n "$KEY" ] || { echo "[markdown-lsp] no OPENROUTER_API_KEY — skipping reindex"; exit 0; }
+  export OPENROUTER_API_KEY="$KEY" MARKDOWN_LSP_AI_ENABLED=1
   echo "[markdown-lsp] Branch switched, re-indexing docs..."
   npx markdown-lsp index ./docs --granularity heading
 fi
@@ -414,7 +436,8 @@ echo $OPENROUTER_API_KEY
 ```
 If the variable is empty, explain: "Get a free key at https://openrouter.ai/keys, then run:
 `export OPENROUTER_API_KEY=sk-or-...` (or add it to your `.env` file — never commit the key)."
-Wait until the user confirms the key is set before continuing.
+Also export `MARKDOWN_LSP_AI_ENABLED=1` — AI is off by default since v1.4.0 and every AI command
+fails without it. Wait until the user confirms both are set before continuing.
 
 If no: skip Steps 3–6 and summarise what works without a key (structural search, link graph).
 
@@ -434,7 +457,7 @@ Default to `heading` if unsure. Explain trade-offs only if asked.
 
 Run:
 ```bash
-OPENROUTER_API_KEY=<key> npx markdown-lsp index <docs-dir> --granularity <choice>
+MARKDOWN_LSP_AI_ENABLED=1 OPENROUTER_API_KEY=<key> npx markdown-lsp index <docs-dir> --granularity <choice>
 ```
 Show the output. Explain: "This caches all embeddings locally in `.markdown-lsp-cache/`.
 Every re-run is free if docs haven't changed — you only pay for what's new or modified."
@@ -452,6 +475,10 @@ If yes, write these two files (replace `<docs-dir>` with the actual path):
 # .git/hooks/post-merge — auto-reindex docs after git pull / git merge
 set -e
 cd "$(git rev-parse --show-toplevel)"
+# AI is off by default (v1.4.0+) — pull the key from .env* and opt in.
+KEY=$(grep -h '^OPENROUTER_API_KEY=' .env.local .env 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"'\''')
+[ -n "$KEY" ] || { echo "[markdown-lsp] no OPENROUTER_API_KEY — skipping reindex"; exit 0; }
+export OPENROUTER_API_KEY="$KEY" MARKDOWN_LSP_AI_ENABLED=1
 echo "[markdown-lsp] Re-indexing docs after merge..."
 npx markdown-lsp index <docs-dir> --granularity <choice>
 echo "[markdown-lsp] Done."
@@ -465,6 +492,9 @@ echo "[markdown-lsp] Done."
 BRANCH_SWITCH="$3"
 if [ "$BRANCH_SWITCH" = "1" ]; then
   cd "$(git rev-parse --show-toplevel)"
+  KEY=$(grep -h '^OPENROUTER_API_KEY=' .env.local .env 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"'\''')
+  [ -n "$KEY" ] || { echo "[markdown-lsp] no OPENROUTER_API_KEY — skipping reindex"; exit 0; }
+  export OPENROUTER_API_KEY="$KEY" MARKDOWN_LSP_AI_ENABLED=1
   echo "[markdown-lsp] Branch switched, re-indexing docs..."
   npx markdown-lsp index <docs-dir> --granularity <choice>
   echo "[markdown-lsp] Done."
@@ -485,7 +515,7 @@ similarity between pages — opens in your browser."
 
 If yes:
 ```bash
-OPENROUTER_API_KEY=<key> npx markdown-lsp graph <docs-dir> --format html --semantic \
+MARKDOWN_LSP_AI_ENABLED=1 OPENROUTER_API_KEY=<key> npx markdown-lsp graph <docs-dir> --format html --semantic \
   --granularity <heading|page> --out docs-graph.html
 ```
 Then open it:
