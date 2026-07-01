@@ -1,0 +1,16 @@
+/Users/dan/Documents/startupin24h/Docsbook/markdown-lsp/test/indexer.test.ts
+/Users/dan/Documents/startupin24h/Docsbook/markdown-lsp/test/parseMarkdown.test.ts
+/Users/dan/Documents/startupin24h/Docsbook/markdown-lsp/test/richDocGraph.test.ts
+/Users/dan/Documents/startupin24h/Docsbook/markdown-lsp/tsconfig.json
+/Users/dan/Documents/startupin24h/Docsbook/markdown-lsp/vitest.config.ts
+/Users/dan/Documents/startupin24h/Docsbook/markdown-lsp/.claude/skills/markdown-lsp/SKILL.md
+/Users/dan/Documents/startupin24h/Docsbook/markdown-lsp/.claude/skills/markdown-lsp/reference.md
+/Users/dan/Documents/startupin24h/Docsbook/markdown-lsp/.github/workflows/ci.yml
+/Users/dan/Documents/startupin24h/Docsbook/markdown-lsp/.github/workflows/publish.yml
+/Users/dan/Documents/startupin24h/Docsbook/markdown-lsp/CHANGELOG.md
+/Users/dan/Documents/startupin24h/Docsbook/markdown-lsp/README.md
+/Users/dan/Documents/startupin24h/Docsbook/markdown-lsp/test/fixtures/sample-vault/api.md
+/Users/dan/Documents/startupin24h/Docsbook/markdown-lsp/test/fixtures/sample-vault/auth.md
+/Users/dan/Documents/startupin24h/Docsbook/markdown-lsp/test/fixtures/sample-vault/billing.md
+/Users/dan/Documents/startupin24h/Docsbook/markdown-lsp/test/fixtures/sample-vault/getting-started.md
+/Users/dan/Documents/startupin24h/Docsbook/markdown-lsp/test/fixtures/sample-vault/index.md

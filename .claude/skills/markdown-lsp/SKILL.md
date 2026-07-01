@@ -2,7 +2,7 @@
 name: markdown-lsp
 description: >
   Teaches any agent to search, navigate, and visualise markdown folders using the markdown-lsp CLI.
-  Use when searching docs/ or about/, getting doc outlines, navigating markdown, finding sections,
+  Use when searching a markdown folder (e.g. docs/), getting doc outlines, navigating markdown, finding sections,
   traversing the doc link graph, exporting a graph, doing full-text / symbol / path / semantic search
   over any markdown directory, or building a persistent semantic index to save API tokens.
   Also covers granular semantic search (heading/line level), the turnkey semantic graph, and
@@ -291,7 +291,6 @@ on:
   push:
     paths:
       - 'docs/**/*.md'
-      - 'about/**/*.md'
 
 jobs:
   index:
@@ -303,7 +302,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .markdown-lsp-cache
-          key: mlsp-${{ hashFiles('docs/**/*.md', 'about/**/*.md') }}-${{ env.EMBEDDING_MODEL || 'default' }}
+          key: mlsp-${{ hashFiles('docs/**/*.md') }}-${{ env.EMBEDDING_MODEL || 'default' }}
           restore-keys: |
             mlsp-
 

@@ -1,0 +1,16 @@
+/Users/dan/Documents/startupin24h/Docsbook/markdown-lsp/bin/markdown-lsp
+/Users/dan/Documents/startupin24h/Docsbook/markdown-lsp/drizzle.config.ts
+/Users/dan/Documents/startupin24h/Docsbook/markdown-lsp/package.json
+/Users/dan/Documents/startupin24h/Docsbook/markdown-lsp/scripts/apply-migration.ts
+/Users/dan/Documents/startupin24h/Docsbook/markdown-lsp/scripts/smoke-ai.ts
+/Users/dan/Documents/startupin24h/Docsbook/markdown-lsp/scripts/smoke-lsp-stdio.ts
+/Users/dan/Documents/startupin24h/Docsbook/markdown-lsp/scripts/smoke-m1.ts
+/Users/dan/Documents/startupin24h/Docsbook/markdown-lsp/scripts/verify-schema.ts
+/Users/dan/Documents/startupin24h/Docsbook/markdown-lsp/src/ai/cache.ts
+/Users/dan/Documents/startupin24h/Docsbook/markdown-lsp/src/ai/config.ts
+/Users/dan/Documents/startupin24h/Docsbook/markdown-lsp/src/ai/embeddings.ts
+/Users/dan/Documents/startupin24h/Docsbook/markdown-lsp/src/ai/extract.ts
+/Users/dan/Documents/startupin24h/Docsbook/markdown-lsp/src/ai/gateway.ts
+/Users/dan/Documents/startupin24h/Docsbook/markdown-lsp/src/ai/granular.ts
+/Users/dan/Documents/startupin24h/Docsbook/markdown-lsp/src/bridge/inMemoryGraph.ts
+/Users/dan/Documents/startupin24h/Docsbook/markdown-lsp/src/bridge/index.ts

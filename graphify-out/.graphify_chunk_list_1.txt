@@ -1,0 +1,16 @@
+/Users/dan/Documents/startupin24h/Docsbook/markdown-lsp/src/bridge/richDocGraph.ts
+/Users/dan/Documents/startupin24h/Docsbook/markdown-lsp/src/cli.ts
+/Users/dan/Documents/startupin24h/Docsbook/markdown-lsp/src/core/documentSymbols.ts
+/Users/dan/Documents/startupin24h/Docsbook/markdown-lsp/src/core/findReferences.ts
+/Users/dan/Documents/startupin24h/Docsbook/markdown-lsp/src/core/index.ts
+/Users/dan/Documents/startupin24h/Docsbook/markdown-lsp/src/db/client.ts
+/Users/dan/Documents/startupin24h/Docsbook/markdown-lsp/src/db/migrations/0000_init.sql
+/Users/dan/Documents/startupin24h/Docsbook/markdown-lsp/src/db/schema.ts
+/Users/dan/Documents/startupin24h/Docsbook/markdown-lsp/src/graph.ts
+/Users/dan/Documents/startupin24h/Docsbook/markdown-lsp/src/indexer/indexer.ts
+/Users/dan/Documents/startupin24h/Docsbook/markdown-lsp/src/indexer/parseMarkdown.ts
+/Users/dan/Documents/startupin24h/Docsbook/markdown-lsp/src/lsp.ts
+/Users/dan/Documents/startupin24h/Docsbook/markdown-lsp/src/server.ts
+/Users/dan/Documents/startupin24h/Docsbook/markdown-lsp/test/ai-disabled.test.ts
+/Users/dan/Documents/startupin24h/Docsbook/markdown-lsp/test/bridge.test.ts
+/Users/dan/Documents/startupin24h/Docsbook/markdown-lsp/test/core.test.ts
