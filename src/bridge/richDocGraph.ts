@@ -377,19 +377,71 @@ interface TokenOccurrence {
   index: number // char offset in page content
 }
 
-/** All occurrences of any query token in a page, in document order. */
+/**
+ * Blank out fenced code blocks and inline code spans, preserving string
+ * LENGTH (and newlines) so every other char offset into the page — snippet
+ * slicing, line/col mapping, section lookup — stays valid without a second
+ * coordinate system.
+ *
+ * Why: a query word repeated inside code (a URL literal pasted into N
+ * per-client install snippets, a CLI flag, a config key) inflates frequency
+ * and shrinks the matched window's span exactly like a real prose discussion
+ * of that word would, but it is not prose — "URL" appearing 12 times across
+ * `https://docsbook.io/api/mcp/server` snippets on an MCP setup page is not
+ * evidence that the page is ABOUT URL structure, yet it out-scored the page
+ * that actually explains the site's URL pattern for exactly this reason
+ * (confirmed on docs/: ai/mcp.md outranked quick-start.md for "What URL
+ * pattern does Docsbook use to serve my documentation site?" purely from
+ * repeated-URL code blocks). Code identifiers are also rarely how a reader
+ * phrases a natural-language question, so this loses little recall.
+ */
+function maskCodeSpans(content: string): string {
+  const blank = (s: string) => s.replace(/[^\n]/g, " ")
+  return content
+    .replace(/```[\s\S]*?```/g, blank)
+    .replace(/~~~[\s\S]*?~~~/g, blank)
+    .replace(/`[^`\n]+`/g, blank)
+}
+
+/** True when neither the char right before `at` nor the char right after
+ *  `at + token.length` is a letter/digit — i.e. `token` is not sandwiched
+ *  inside a longer word on BOTH sides. A match with a letter on only one
+ *  side (a plural "docs" ⊃ "doc", or a suffix like "reindexing" ⊃ "index")
+ *  still counts, matching the recall trade-off `tokenOccurrences` has always
+ *  documented — this only rejects the case neither side is a boundary. */
+function hasWordBoundary(lower: string, at: number, len: number): boolean {
+  const before = at > 0 ? (lower[at - 1] ?? "") : ""
+  const after = at + len < lower.length ? (lower[at + len] ?? "") : ""
+  const isWordChar = (c: string) => /[\p{L}\p{N}]/u.test(c)
+  return !(isWordChar(before) && isWordChar(after))
+}
+
+/** All occurrences of any query token in a page, in document order. Runs
+ *  against a code-masked view of the content (see `maskCodeSpans`) so
+ *  offsets still index correctly into the original `content` for snippet
+ *  extraction and line/col mapping, but code-literal matches don't count. */
 function tokenOccurrences(content: string, tokens: string[]): TokenOccurrence[] {
   const occ: TokenOccurrence[] = []
-  const lower = content.toLowerCase()
+  const lower = maskCodeSpans(content).toLowerCase()
   for (const token of tokens) {
     let from = 0
     for (;;) {
       const at = lower.indexOf(token, from)
       if (at === -1) break
-      // word-ish boundary check so "doc" doesn't match inside "docker" only when
-      // it's clearly a substring of a longer word on BOTH sides; we still allow
-      // prefix/suffix matches (plurals, "docs" ⊃ "doc") for recall.
-      occ.push({ token, index: at })
+      // word-ish boundary check so "serve" doesn't match inside "server"/
+      // "deserve" only when it's sandwiched inside a longer word on BOTH
+      // sides — this used to be a comment with no code behind it: a bare
+      // indexOf let "serve" match every "Server"/"servers"/"serverUrl" on an
+      // MCP setup page, inflating its score for an unrelated question ("What
+      // URL pattern does Docsbook use to serve my documentation site?")
+      // purely from a word that shares a substring with the page's real
+      // topic. Confirmed on docs/: ai/mcp.md scored 3+ false "serve" hits
+      // this way and outranked quick-start.md, the page with the actual
+      // answer. Prefix/suffix matches (plurals, "docs" ⊃ "doc") still count,
+      // same recall trade-off as always documented here.
+      if (hasWordBoundary(lower, at, token.length)) {
+        occ.push({ token, index: at })
+      }
       from = at + token.length
     }
   }
@@ -456,6 +508,42 @@ export interface RankedSearchHit extends SearchHit {
  * proximity. Best for natural-language questions from an AI chat. One hit per
  * page (the best window), highest score first.
  */
+/**
+ * Per-token IDF (inverse document frequency) across the whole graph, so a rare,
+ * discriminating word ("pattern", on 18 of 88 pages) counts far more toward a
+ * page's score than a near-universal one ("docsbook"/"documentation"/"site",
+ * each on 60-90% of pages in a docs corpus, since almost every page mentions
+ * the product name and says it's "documentation" for a "site" somewhere).
+ *
+ * Root cause this fixes: `coverage` used to be a flat `distinctTokensPresent /
+ * tokenCount`, treating every query word as equally informative. For "What URL
+ * pattern does Docsbook use to serve my documentation site?" the tokens after
+ * stopword removal are [url, pattern, docsbook, serve, documentation, site] —
+ * FIVE of those six appear on most pages in this repo's docs/, so coverage
+ * alone could not tell quick-start.md (the one page with the actual pattern)
+ * apart from generic pages that merely mention "docsbook"/"documentation"/
+ * "site" a lot. Confirmed on docs/: quick-start.md ranked #4, beaten by three
+ * unrelated pages that happened to repeat the common tokens more/closer
+ * together. Classic TF-IDF: log(N / df) makes a term's contribution shrink as
+ * it gets more common, so "pattern" (rare) now outweighs "site" (ubiquitous).
+ */
+function computeIdf(pages: readonly GraphPage[], tokens: string[]): Map<string, number> {
+  const n = pages.length || 1
+  const idf = new Map<string, number>()
+  for (const t of tokens) {
+    let df = 0
+    for (const p of pages) {
+      if (p.content.toLowerCase().includes(t)) df++
+    }
+    // +1 smoothing on both df and the log argument keeps this finite and >0
+    // even when a token is on every page (df === n) or on zero (df === 0,
+    // though such a token would never reach here since it produced no
+    // occurrences for any page in the caller's loop).
+    idf.set(t, Math.log((n + 1) / (df + 1)) + 1)
+  }
+  return idf
+}
+
 export function searchTextRanked(
   graph: RichDocGraph,
   query: string,
@@ -465,6 +553,8 @@ export function searchTextRanked(
   if (tokens.length === 0) return []
   const limit = opts.limit ?? 20
   const ctx = opts.contextChars ?? 120
+  const idf = computeIdf(graph.pages, tokens)
+  const idfSum = tokens.reduce((s, t) => s + (idf.get(t) ?? 1), 0) || 1
 
   const hits: RankedSearchHit[] = []
   for (const p of graph.pages) {
@@ -475,24 +565,62 @@ export function searchTextRanked(
     const win = bestWindow(occ, tokens.length)
     if (!win) continue
 
-    const coverage = win.covered.size / tokens.length // 0..1 fraction of query words present
+    // IDF-weighted coverage: sum of the matched tokens' IDF weight, normalized
+    // by the query's total possible IDF weight — so covering the query's rare,
+    // discriminating words scores higher than covering the same COUNT of its
+    // common ones. Falls back to the old flat fraction's scale (0..1) when all
+    // tokens are equally rare/common, so this is a strict refinement, not a
+    // different scale.
+    const coverage = [...win.covered].reduce((s, t) => s + (idf.get(t) ?? 1), 0) / idfSum
     const frequency = occ.length // total token occurrences (capped in score)
 
     // Heading bonus: any query token appearing in a page heading or title.
+    // Also IDF-weighted for the same reason as coverage above — a rare word in
+    // a heading is a much stronger relevance signal than a common one.
     const headingHay = (
       (p.title ?? "") + " " + p.sections.map((s) => s.headingPath.join(" ")).join(" ")
     ).toLowerCase()
-    const headingHits = tokens.filter((t) => headingHay.includes(t)).length
+    // Same word-boundary fix as tokenOccurrences: a plain `.includes(t)` let
+    // "serve" match the "MCP Server" title/heading, crediting an unrelated
+    // page with a heading hit it never earned.
+    const headingHits = tokens
+      .filter((t) => {
+        let from = 0
+        for (;;) {
+          const at = headingHay.indexOf(t, from)
+          if (at === -1) return false
+          if (hasWordBoundary(headingHay, at, t.length)) return true
+          from = at + t.length
+        }
+      })
+      .reduce((s, t) => s + (idf.get(t) ?? 1), 0)
 
     // Proximity bonus: tighter windows (near-phrase) score higher. A window that
     // spans roughly the matched tokens' own length is ~phrase-adjacent.
+    //
+    // Uses an asymptotic decay (idealSpan / (idealSpan + span)) rather than a
+    // linear falloff clamped at 0. The old `1 - span / (idealSpan * 8)` formula
+    // hit its floor of exactly 0 for ANY span beyond ~8x the ideal — which on
+    // real docs pages (thousands of chars between the first and last matched
+    // token) is nearly always, since a full-sentence question's tokens rarely
+    // cluster inside a couple hundred characters. That flattened proximity to a
+    // constant 0 across most/all candidate pages for a query, so real pages tied
+    // on coverage+headingHits and the ranking silently fell back to array/file
+    // order — not relevance — to break the tie. Confirmed on this repo's own
+    // docs/: 9 pages tied at score 121.000 for "What URL pattern does Docsbook
+    // use to serve my documentation site?", including both the page with the
+    // correct answer (quick-start.md) and an unrelated one (a custom-domain
+    // blog post) that a chat then cited instead purely because it sorted first.
+    // The new formula never truly reaches 0 (asymptotic, not clamped), so a
+    // 1200-char span still scores measurably lower than a 400-char span instead
+    // of both collapsing to the same floor.
     const idealSpan = win.covered.size * 12
-    const proximity = win.span <= 0 ? 1 : Math.max(0, 1 - win.span / Math.max(idealSpan * 8, 1))
+    const proximity = win.span <= 0 ? 1 : idealSpan / (idealSpan + win.span)
 
     const matchScore =
-      coverage * 100 + // dominant: how much of the query is present
-      headingHits * 8 + // strong signal: the words are in a heading/title
-      proximity * 12 + // near-phrase matches beat scattered words
+      coverage * 100 + // dominant: how much of the query's IDF-weighted mass is present (0..1 scale, same as before IDF)
+      headingHits * 8 + // strong signal: the words are in a heading/title (IDF-weighted sum, not a raw count)
+      proximity * 20 + // near-phrase matches beat scattered words (now a live signal, weighted up from 12)
       Math.min(frequency, 10) * 0.5 // mild frequency nudge, capped
 
     // Snippet centred on the best window.

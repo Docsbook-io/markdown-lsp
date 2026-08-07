@@ -152,6 +152,175 @@ describe("searchTextRanked", () => {
   it("returns [] when no query token appears anywhere", () => {
     expect(searchTextRanked(graph, "kubernetes terraform")).toEqual([])
   })
+
+  // Regression: on real (multi-thousand-char) docs pages, the old proximity
+  // formula (`1 - span / (idealSpan * 8)`) hit its floor of exactly 0 for any
+  // span past ~288 chars (3-token query: 3 * 12 * 8) — which real docs pages
+  // blow past routinely, since a full-sentence question's tokens rarely
+  // cluster inside a couple hundred characters. Two pages whose matched
+  // window is 800 chars and 4000 chars therefore scored IDENTICALLY on
+  // proximity under the old formula (both 0), even though one is clearly a
+  // tighter, more relevant match — the ranking then fell back to array/file
+  // order, not relevance, to decide which ranked higher. This is exactly how
+  // a page containing the right answer (docs/quick-start.md, in this repo's
+  // own docs/) lost to unrelated pages purely because of iteration order.
+  // Both fixture spans below are well past the old floor, so a pre-fix run
+  // must score them equal (this test is red on the pre-fix code).
+  it("does not flatten proximity to a hard-tied floor on long, spread-out matches", () => {
+    const longFiles = [
+      {
+        path: "medium-spread.md",
+        content:
+          "# Medium Spread\n\n" +
+          "alpha " +
+          "x ".repeat(400) +
+          "beta " +
+          "y ".repeat(400) +
+          "gamma\n",
+      },
+      {
+        path: "very-spread.md",
+        // Same three tokens, spread roughly 5x further apart than the page
+        // above — representative of a real docs page where a question's
+        // words land in different, unrelated sections.
+        content:
+          "# Very Spread\n\n" +
+          "alpha " +
+          "x ".repeat(2000) +
+          "beta " +
+          "y ".repeat(2000) +
+          "gamma\n",
+      },
+    ]
+    const longGraph = RichDocGraph.fromFiles(longFiles)
+    const ranked = searchTextRanked(longGraph, "alpha beta gamma", { limit: 10 })
+    expect(ranked).toHaveLength(2)
+    const medium = ranked.find((h) => h.pagePath === "medium-spread.md")!
+    const veryspread = ranked.find((h) => h.pagePath === "very-spread.md")!
+    // Both have 100% coverage and zero heading hits, so the ONLY thing that
+    // can (and must) separate them is proximity — it must not have collapsed
+    // to the same floor for both, even though both spans are already well
+    // past the point where the old formula flattened to 0.
+    expect(medium.matchScore).toBeGreaterThan(veryspread.matchScore)
+    expect(medium.matchScore - veryspread.matchScore).toBeGreaterThan(0.1)
+  })
+
+  // Regression: a query word repeated inside fenced/inline code (a URL pasted
+  // into several install snippets, a CLI flag, a config key) counted as real
+  // occurrences exactly like a prose discussion of that word would, so a page
+  // that only pastes the term into code samples — never actually discussing
+  // it — could out-rank, or spuriously tie with, a page that genuinely
+  // explains it in prose. Confirmed on this repo's own docs/: ai/mcp.md (12
+  // "URL" hits, all inside per-client install code blocks) out-scored
+  // quick-start.md (which explains the URL pattern in prose) for "What URL
+  // pattern does Docsbook use to serve my documentation site?".
+  it("does not count a query word repeated only inside code spans as a match", () => {
+    const codeFiles = [
+      {
+        path: "prose.md",
+        content:
+          "# Docs\n\n" +
+          "Your site is served at a predictable URL pattern based on your account and repo name.\n",
+      },
+      {
+        path: "code-only.md",
+        // Both query words appear ONLY inside fenced code, repeated across
+        // six client-install snippets — never once in actual prose.
+        content:
+          "# Server Setup\n\n" +
+          "Paste this into each of your six clients:\n\n" +
+          "```\nurl pattern: https://example.com/a\n```\n" +
+          "```\nurl pattern: https://example.com/b\n```\n" +
+          "```\nurl pattern: https://example.com/c\n```\n" +
+          "```\nurl pattern: https://example.com/d\n```\n" +
+          "```\nurl pattern: https://example.com/e\n```\n" +
+          "```\nurl pattern: https://example.com/f\n```\n" +
+          "Setup complete once all clients are configured.\n",
+      },
+    ]
+    const codeGraph = RichDocGraph.fromFiles(codeFiles)
+    const ranked = searchTextRanked(codeGraph, "URL pattern", { limit: 10 })
+    // code-only.md's tokens exist nowhere outside code, so masking must drop
+    // it from the results entirely rather than let the code occurrences count.
+    expect(ranked.map((h) => h.pagePath)).toEqual(["prose.md"])
+  })
+
+  // Regression: `tokenOccurrences`/heading-hit matching used to be a bare
+  // `indexOf`/`.includes()` substring search, no word-boundary check at all —
+  // despite a comment claiming one existed. A query word matched inside any
+  // longer word that merely contains it as a substring, crediting a page with
+  // occurrences (and heading hits, if it landed in a title) it never earned.
+  // Word-boundary checking only rejects a MID-WORD sandwich (a letter on BOTH
+  // sides, like "cat" inside "concatenate"); a match with a boundary on just
+  // one side (a prefix like "url" ⊂ "urls", or a suffix like "doc" ⊂ "docs")
+  // still counts — that half of the trade-off is deliberate (see the next
+  // test) and not something a boundary check alone can resolve without real
+  // stemming.
+  it("does not match a query word sandwiched inside a longer word on both sides", () => {
+    const files = [
+      {
+        path: "concat-only.md",
+        // "cat" only ever appears as a mid-word substring of "concatenate"
+        // here — never as the standalone word.
+        content: "# String Utilities\n\nUse this helper to concatenate multiple strings efficiently.\n",
+      },
+      {
+        path: "real-cat-page.md",
+        content: "# Pets\n\nOur cat sleeps most of the day.\n",
+      },
+    ]
+    const g = RichDocGraph.fromFiles(files)
+    const ranked = searchTextRanked(g, "cat", { limit: 10 })
+    // concat-only.md has zero standalone occurrences of "cat" (only as a
+    // mid-word substring of "concatenate"), so it must not appear at all.
+    expect(ranked.map((h) => h.pagePath)).toEqual(["real-cat-page.md"])
+  })
+
+  it("still allows a genuine prefix/suffix match (plurals, stems)", () => {
+    const files = [{ path: "p.md", content: "# Docs\n\nWe support multiple docs sites and doc formats.\n" }]
+    const g = RichDocGraph.fromFiles(files)
+    // "doc" is a real prefix of "docs" — this recall trade-off must still work
+    // after the word-boundary fix (only mid-word sandwiching is rejected).
+    const ranked = searchTextRanked(g, "doc", { limit: 10 })
+    expect(ranked.map((h) => h.pagePath)).toEqual(["p.md"])
+  })
+
+  // Regression: `coverage` used to be a flat fraction of distinct query words
+  // present, treating every word as equally informative. On a real docs
+  // corpus, a common word ("common", present on 7/8 pages here) carries far
+  // less relevance signal than a rare, discriminating one ("rare", present on
+  // only 1/8) — so two pages that each cover the SAME NUMBER of query words
+  // (2 of "shared rare common") are not equally relevant depending on WHICH
+  // words those are, and the old flat fraction couldn't tell them apart.
+  //
+  // The two candidate pages below use an identical template (only the single
+  // rare/common word differs, in the same sentence position), so coverage
+  // fraction, frequency, proximity, and heading hits are all equal between
+  // them — isolating IDF as the only thing that can (and must) separate them.
+  // On the pre-fix code this pair still happens to differ, but only by
+  // ~0.1 points of proximity-span noise from the differing word length —
+  // confirmed via `git stash` on this file, margin 78.729 vs 78.604. The
+  // `> 10` threshold below is well above that noise floor, so this only
+  // passes when IDF is deliberately weighting the rare word, not by luck.
+  it("weights a rare, discriminating query word above a common one shared by most pages", () => {
+    const filler = "This filler page exists only to make common appear frequently across the corpus.\n"
+    const files = [
+      { path: "filler-1.md", content: `# F1\n\n${filler}` },
+      { path: "filler-2.md", content: `# F2\n\n${filler}` },
+      { path: "filler-3.md", content: `# F3\n\n${filler}` },
+      { path: "filler-4.md", content: `# F4\n\n${filler}` },
+      { path: "filler-5.md", content: `# F5\n\n${filler}` },
+      { path: "filler-6.md", content: `# F6\n\n${filler}` },
+      { path: "covers-common.md", content: "# Match\n\nThis page discusses shared and common topics together.\n" },
+      { path: "covers-rare.md", content: "# Match\n\nThis page discusses shared and rare topics together.\n" },
+    ]
+    const g = RichDocGraph.fromFiles(files)
+    const ranked = searchTextRanked(g, "shared rare common", { limit: 10 })
+    const rareHit = ranked.find((h) => h.pagePath === "covers-rare.md")!
+    const commonHit = ranked.find((h) => h.pagePath === "covers-common.md")!
+    expect(ranked[0]?.pagePath).toBe("covers-rare.md")
+    expect(rareHit.matchScore - commonHit.matchScore).toBeGreaterThan(10)
+  })
 })
 
 describe("resolveToGithubUrl", () => {
