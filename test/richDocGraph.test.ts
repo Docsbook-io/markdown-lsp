@@ -171,6 +171,22 @@ describe("search — frontmatter is never exposed", () => {
   it("page title comes from the real H1, not a frontmatter key", () => {
     expect(fmGraph.pageByPath("concepts.md")?.title).toBe("Как устроен NN Agent")
   })
+
+  it("listPages headingsCount matches the real headings on the page, not real+1", () => {
+    // Regression: get_doc_outline (backed by listPages) reported exactly one
+    // extra heading on every frontmattered page — the frontmatter block
+    // counted as heading #1 ahead of the actual "# Как устроен NN Agent".
+    const [summary] = listPages(fmGraph, { prefix: "concepts.md" })
+    expect(summary!.headingsCount).toBe(1)
+  })
+
+  it("listPages charCount reflects visible content, not frontmatter-inflated length", () => {
+    const [summary] = listPages(fmGraph, { prefix: "concepts.md" })
+    const rawLength = frontmatterFiles[0]!.content.length
+    // The frontmatter block occupies real characters in the raw file; a
+    // reader-facing char count should not include markup they never see.
+    expect(summary!.charCount).toBeLessThan(rawLength)
+  })
 })
 
 describe("searchTextRanked", () => {
