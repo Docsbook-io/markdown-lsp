@@ -1,4 +1,4 @@
-import { parseMarkdown, type ParsedSection, type ParsedLink } from "../indexer/parseMarkdown.js"
+import { parseMarkdown, stripFrontmatterKeepLines, type ParsedSection, type ParsedLink } from "../indexer/parseMarkdown.js"
 
 export interface InMemoryFile {
   path: string
@@ -93,7 +93,10 @@ export function buildInMemoryGraph(files: InMemoryFile[]): InMemoryGraph {
     pages.push({
       path: f.path,
       title: parsed.title,
-      content: f.content,
+      // Frontmatter-stripped (line numbers preserved) — this is the text full-text
+      // search and snippet extraction scan directly, and it must never surface
+      // YAML frontmatter to a reader. See stripFrontmatterKeepLines.
+      content: stripFrontmatterKeepLines(f.content),
       sections: parsed.sections.map(
         (s): GraphSection => ({
           headingPath: s.headingPath,

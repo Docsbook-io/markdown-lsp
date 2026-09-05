@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest"
-import { parseMarkdown, slugify } from "../src/indexer/parseMarkdown.js"
+import { parseMarkdown, slugify, stripFrontmatterKeepLines } from "../src/indexer/parseMarkdown.js"
 
 describe("slugify", () => {
   it("lowercases and replaces spaces", () => {
@@ -49,6 +49,60 @@ describe("parseMarkdown — structure", () => {
     expect(sections[0]!.positionStartLine).toBe(0)
     expect(sections[1]!.headingPath).toEqual(["A", "B"])
     expect(sections[1]!.positionStartLine).toBe(2)
+  })
+})
+
+describe("parseMarkdown — frontmatter", () => {
+  // Regression: a colon inside a quoted value plus the closing `---`
+  // immediately after non-blank YAML lines used to parse as a Setext
+  // heading, so this exact frontmatter body leaked into headingPath.
+  const md = [
+    "---",
+    'title: "Как устроен NN Agent: клиент, аккаунт, кампания, диалог"',
+    'description: "Разбор сущностей NN Agent, из которых строится всё остальное."',
+    "---",
+    "# Как запустить первую кампанию по API",
+    "",
+    "Body text mentions Paddle billing.",
+  ].join("\n")
+
+  it("never emits the frontmatter block as a heading", () => {
+    const { sections } = parseMarkdown(md)
+    const allHeadingText = sections.flatMap((s) => s.headingPath).join(" ")
+    expect(allHeadingText).not.toContain("title:")
+    expect(allHeadingText).not.toContain("description:")
+    expect(allHeadingText).not.toContain("---")
+  })
+
+  it("uses the real H1 as title, not a frontmatter key", () => {
+    const { title } = parseMarkdown(md)
+    expect(title).toBe("Как запустить первую кампанию по API")
+  })
+
+  it("keeps section content free of frontmatter and its delimiters", () => {
+    const { sections } = parseMarkdown(md)
+    const allContent = sections.map((s) => s.content).join("\n")
+    expect(allContent).not.toContain("title:")
+    expect(allContent).not.toContain("description:")
+    expect(allContent).not.toContain("---")
+  })
+
+  it("preserves line numbers of content after the frontmatter block", () => {
+    const { sections } = parseMarkdown(md)
+    // The H1 is on line index 4 (0-based) in the original source, same as
+    // before frontmatter stripping was added — downstream position math
+    // (e.g. an editor jumping to this heading) must not shift.
+    expect(sections[0]!.positionStartLine).toBe(4)
+  })
+
+  it("returns source unchanged when there is no frontmatter", () => {
+    const plain = "# Hello\n\nbody"
+    expect(stripFrontmatterKeepLines(plain)).toBe(plain)
+  })
+
+  it("falls back to the raw source on malformed YAML instead of throwing", () => {
+    const broken = "---\ntitle: [unclosed\n---\n# Heading\n"
+    expect(() => stripFrontmatterKeepLines(broken)).not.toThrow()
   })
 })
 

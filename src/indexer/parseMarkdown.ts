@@ -2,9 +2,39 @@ import { unified } from "unified"
 import remarkParse from "remark-parse"
 import remarkGfm from "remark-gfm"
 import { toString as mdastToString } from "mdast-util-to-string"
+import matter from "gray-matter"
 import type { Root, Heading, Link, LinkReference, Definition, Node, Parent } from "mdast"
 
 const parser = unified().use(remarkParse).use(remarkGfm)
+
+/**
+ * Remove a leading YAML frontmatter block (`---\n...\n---`), replacing it
+ * with the same number of blank lines so every downstream line/col
+ * position — headings, sections, links, and any editor position that maps
+ * back to the real file — still lines up with the original source.
+ *
+ * Without this, remark has no notion of frontmatter and parses the block as
+ * ordinary markdown: the closing `---` right after non-blank YAML lines
+ * reads as a Setext heading underline, so the frontmatter body (title,
+ * description, ...) becomes the page's first "heading", and its text leaks
+ * into every heading path, snippet, and deep-link anchor built from it.
+ *
+ * Falls back to returning `source` unchanged if it doesn't start with a
+ * frontmatter delimiter, or if the YAML fails to parse (malformed
+ * frontmatter is a page's own problem, not something to silently eat).
+ */
+export function stripFrontmatterKeepLines(source: string): string {
+  if (!/^---\r?\n/.test(source)) return source
+  let body: string
+  try {
+    body = matter(source).content
+  } catch {
+    return source
+  }
+  const frontmatterBlock = source.slice(0, source.length - body.length)
+  const lineCount = (frontmatterBlock.match(/\n/g) ?? []).length
+  return "\n".repeat(lineCount) + body
+}
 
 export interface ParsedSection {
   headingPath: string[]
@@ -92,7 +122,8 @@ function parseLinkTarget(raw: string): { path: string; anchor: string | null } {
   return { path: raw.slice(0, hashAt), anchor: raw.slice(hashAt + 1) || null }
 }
 
-export function parseMarkdown(source: string): ParsedDocument {
+export function parseMarkdown(rawSource: string): ParsedDocument {
+  const source = stripFrontmatterKeepLines(rawSource)
   const tree = parser.parse(source) as Root
 
   const definitions = new Map<string, string>()

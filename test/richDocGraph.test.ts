@@ -115,6 +115,64 @@ describe("search", () => {
   })
 })
 
+describe("search — frontmatter is never exposed", () => {
+  // Regression: the closing `---` right after non-blank YAML (including a
+  // colon inside a quoted string) used to parse as a Setext heading, so the
+  // frontmatter body leaked into headingPath, and the raw page content
+  // (frontmatter included) was what searchText/searchTextRanked scanned,
+  // so it also bled into snippets.
+  const frontmatterFiles = [
+    {
+      path: "concepts.md",
+      content: [
+        "---",
+        'title: "Как устроен NN Agent: клиент, аккаунт, кампания, диалог"',
+        'description: "Разбор сущностей NN Agent, из которых строится всё остальное."',
+        "---",
+        "# Как устроен NN Agent",
+        "",
+        "Клиент создаёт аккаунт мессенджера и запускает кампанию.",
+      ].join("\n"),
+    },
+  ]
+  const fmGraph = RichDocGraph.fromFiles(frontmatterFiles)
+
+  it("headingPath from a matched section never contains frontmatter keys or delimiters", () => {
+    const hits = searchText(fmGraph, "аккаунт")
+    expect(hits.length).toBeGreaterThan(0)
+    for (const h of hits) {
+      const joined = h.headingPath.join(" ")
+      expect(joined).not.toContain("title:")
+      expect(joined).not.toContain("description:")
+      expect(joined).not.toContain("---")
+    }
+  })
+
+  it("snippet from searchText never bleeds frontmatter body or its delimiters", () => {
+    const hits = searchText(fmGraph, "мессенджера")
+    expect(hits.length).toBeGreaterThan(0)
+    for (const h of hits) {
+      expect(h.snippet).not.toContain("title:")
+      expect(h.snippet).not.toContain("description:")
+      expect(h.snippet).not.toContain("---")
+    }
+  })
+
+  it("snippet from searchTextRanked never bleeds frontmatter body or its delimiters", () => {
+    const ranked = searchTextRanked(fmGraph, "аккаунт кампания")
+    expect(ranked.length).toBeGreaterThan(0)
+    for (const h of ranked) {
+      expect(h.snippet).not.toContain("title:")
+      expect(h.snippet).not.toContain("description:")
+      expect(h.snippet).not.toContain("---")
+    }
+  })
+
+  it("page title comes from the real H1, not a frontmatter key", () => {
+    expect(fmGraph.pageByPath("concepts.md")?.title).toBe("Как устроен NN Agent")
+  })
+})
+
 describe("searchTextRanked", () => {
   it("matches individual words, not the literal phrase (the searchText gap)", () => {
     // The phrase "OAuth token redirect" appears nowhere verbatim, so the legacy
